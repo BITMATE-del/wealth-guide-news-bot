@@ -13,7 +13,11 @@ const GOOGLE_NEWS_QUERIES = [
   { q: "Federal Reserve OR FOMC interest rate inflation CPI PCE jobs", label: "글로벌 경제" },
   { q: "Bank of Korea interest rate inflation won exchange rate Korea economy", label: "한국 경제" },
   { q: "Nasdaq S&P 500 Dow futures market crash rally volatility", label: "미국 증시" },
-  { q: "KOSPI KOSDAQ Samsung SK Hynix market", label: "국내 증시" },
+  { q: "KOSPI KOSDAQ 삼성전자 SK하이닉스 국내 증시 급등 급락 수급 외국인 기관", label: "국내 증시" },
+  { q: "코스피 코스닥 상한가 하한가 거래정지 공시 실적 어닝쇼크 어닝서프라이즈", label: "국내주식 속보" },
+  { q: "삼성전자 SK하이닉스 현대차 기아 LG에너지솔루션 NAVER 카카오 셀트리온 POSCO 주가", label: "국내 대형주" },
+  { q: "반도체 2차전지 바이오 방산 조선 원전 로봇 AI 국내주식 정책 수주 계약", label: "국내 테마주" },
+  { q: "금융위원회 금융감독원 한국거래소 공매도 세제 밸류업 자사주 상법 국내 증시", label: "국내 증시 정책" },
   { q: "Bitcoin Ethereum ETF SEC crypto regulation exchange hack liquidation", label: "코인" },
   { q: "oil gold bond yield dollar index geopolitical sanctions", label: "글로벌 시장" },
   { q: "Nvidia Apple Microsoft Tesla earnings guidance merger acquisition", label: "기업" }
@@ -31,7 +35,10 @@ const WEIGHTS = [
   [/(sec|etf|regulation|ban|approval|lawsuit|규제|승인|금지|제재)/i, 3],
   [/(hack|exploit|breach|해킹|탈취|보안 사고|liquidation|청산|depeg|디페깅)/i, 5],
   [/(war|attack|missile|ceasefire|sanction|전쟁|공격|미사일|휴전|제재)/i, 4],
-  [/(earnings|guidance|실적|가이던스|merger|acquisition|m&a|인수|합병)/i, 2],
+  [/(earnings|guidance|실적|가이던스|merger|acquisition|m&a|인수|합병|어닝쇼크|어닝서프라이즈|잠정실적)/i, 2],
+  [/(공시|수주|공급계약|대규모 계약|유상증자|무상증자|자사주|소각|분할|상장폐지|관리종목|거래정지|상한가|하한가)/i, 4],
+  [/(삼성전자|SK하이닉스|현대차|기아|LG에너지솔루션|NAVER|카카오|셀트리온|POSCO|포스코)/i, 2],
+  [/(외국인.*(순매수|순매도)|기관.*(순매수|순매도)|프로그램.*매매|공매도|밸류업|금융위원회|금융감독원|한국거래소)/i, 3],
   [/(nasdaq|s&p|dow|kospi|kosdaq|나스닥|코스피|코스닥|bitcoin|btc|ethereum|eth|비트코인|이더리움)/i, 2],
   [/(plunge|surge|soar|tumble|crash|급락|급등|폭락|폭등|사상 최고|record high)/i, 3],
   [/(treasury yield|bond yield|dollar index|환율|원달러|국채금리|채권금리|유가|oil|gold|금값)/i, 2]
@@ -100,7 +107,7 @@ function classify(item) {
   const t = `${item.title} ${item.description}`;
   const tags = [];
   if (/(bitcoin|btc|ethereum|eth|crypto|코인|비트코인|이더리움|거래소|stablecoin|스테이블)/i.test(t)) tags.push("코인");
-  if (/(nasdaq|s&p|dow|stock|equity|kospi|kosdaq|주식|증시|코스피|코스닥|earnings|실적)/i.test(t)) tags.push("주식");
+  if (/(nasdaq|s&p|dow|stock|equity|kospi|kosdaq|주식|증시|코스피|코스닥|earnings|실적|공시|수주|상한가|하한가|거래정지)/i.test(t)) tags.push("주식");
   if (/(rate|inflation|cpi|pce|gdp|jobs|yield|dollar|economy|금리|물가|고용|환율|경제|채권)/i.test(t)) tags.push("경제");
   return tags.length ? [...new Set(tags)].join(" · ") : item.label || "시장";
 }
@@ -111,7 +118,9 @@ function impactHint(item) {
   if (/(rate cut|금리 인하)/i.test(t)) return "채권금리·달러·성장주·가상자산의 동반 반응을 확인하세요.";
   if (/(hack|exploit|해킹|탈취|depeg|디페깅)/i.test(t)) return "관련 거래소·토큰의 입출금 상태와 시장 유동성을 우선 확인하세요.";
   if (/(war|attack|missile|sanction|전쟁|공격|제재)/i.test(t)) return "유가·금·달러·주가지수 선물의 단기 변동성을 확인하세요.";
-  if (/(earnings|guidance|실적|가이던스)/i.test(t)) return "시간외·선물 반응과 동종 업종으로의 영향 확산 여부를 확인하세요.";
+  if (/(earnings|guidance|실적|가이던스|어닝쇼크|어닝서프라이즈)/i.test(t)) return "해당 종목의 실적 대비 시장 기대치와 동종 업종으로의 영향 확산 여부를 확인하세요.";
+  if (/(공시|수주|공급계약|유상증자|무상증자|자사주|소각|분할|거래정지|상장폐지)/i.test(t)) return "공시 원문과 거래소 안내, 해당 종목의 거래 상태 및 수급 변화를 우선 확인하세요.";
+  if (/(외국인|기관|공매도|밸류업|금융위원회|금융감독원|한국거래소)/i.test(t)) return "코스피·코스닥 지수와 외국인·기관 수급, 관련 업종의 동반 움직임을 확인하세요.";
   return "주요 지수·환율·채권금리·BTC의 동시 반응을 확인하세요.";
 }
 
