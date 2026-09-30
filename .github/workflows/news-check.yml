@@ -1,0 +1,50 @@
+name: Wealth Guide News Check
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wealth-guide-news-bot
+  cancel-in-progress: false
+
+jobs:
+  check-news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Check important news
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          IMPORTANCE_THRESHOLD: ${{ vars.IMPORTANCE_THRESHOLD || '7' }}
+          MAX_ALERTS_PER_RUN: ${{ vars.MAX_ALERTS_PER_RUN || '4' }}
+        run: npm run check
+
+      - name: Save dedupe state
+        run: |
+          if git diff --quiet -- state/news-state.json; then
+            echo "No state changes."
+            exit 0
+          fi
+          git config user.name "wealth-guide-news-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/news-state.json
+          git commit -m "chore: update news alert state [skip ci]"
+          git push
