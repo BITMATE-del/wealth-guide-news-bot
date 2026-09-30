@@ -5,7 +5,7 @@ import { XMLParser } from "fast-xml-parser";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const DRY_RUN = process.env.DRY_RUN === "1";
-const THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || 7);
+const THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || 5);
 const MAX_ALERTS = Number(process.env.MAX_ALERTS_PER_RUN || 4);
 const STATE_PATH = new URL("../state/news-state.json", import.meta.url);
 
@@ -265,7 +265,7 @@ function relationBlock(item) {
 }
 
 function buildMessage(item, points) {
-  const importance = points >= 11 ? "매우 높음" : "높음";
+  const importance = points >= 9 ? "매우 높음" : "높음";
   const area = classify(item);
   const description = truncate(item.description || "세부 내용은 원문에서 확인할 수 있습니다.", 260);
   const category =
