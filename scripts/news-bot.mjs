@@ -276,29 +276,26 @@ function buildMessage(item, points) {
     "🌐 글로벌";
 
   return [
-    "━━━━━━━━━━━━━━━━━━",
     "🧭 <b>부의 길잡이 | MARKET BRIEF</b>",
     "<i>부의 방향을 찾다</i>",
     "━━━━━━━━━━━━━━━━━━",
     "",
-    `<b>${category}</b>  |  <b>중요도 ${importance}</b>`,
+    `<b>${category} | 중요도 ${importance}</b>`,
     "",
     `📰 <b>${escapeHtml(item.title)}</b>`,
     "",
     "<b>📌 핵심 요약</b>",
     escapeHtml(description),
     "",
-    `<b>📊 영향 영역</b>  ${escapeHtml(area)}`,
+    "<b>📊 영향 영역</b>",
+    escapeHtml(area),
     "",
     relationBlock(item),
     "",
     "<b>👀 체크포인트</b>",
     escapeHtml(impactHint(item)),
     "",
-    `🔎 <a href="${escapeHtml(item.link)}">원문 확인</a>`,
-    "",
-    "━━━━━━━━━━━━━━━━━━",
-    "※ 관련주·관련코인 표시는 뉴스와의 사업·수급·정책 연관성을 설명한 참고 정보이며, 매수·매도 추천이 아닙니다."
+    `🔎 <a href="${escapeHtml(item.link)}">원문 확인</a>`
   ].join("\n");
 }
 
