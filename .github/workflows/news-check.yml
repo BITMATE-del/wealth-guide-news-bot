@@ -24,7 +24,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: npm
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -35,7 +34,12 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           IMPORTANCE_THRESHOLD: ${{ vars.IMPORTANCE_THRESHOLD || '7' }}
           MAX_ALERTS_PER_RUN: ${{ vars.MAX_ALERTS_PER_RUN || '4' }}
-        run: npm run check
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram secrets are not configured yet. Skipping."
+            exit 0
+          fi
+          npm run check
 
       - name: Save dedupe state
         run: |
