@@ -1,0 +1,13 @@
+{
+  "name": "wealth-guide-news-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/news-bot.mjs",
+    "test": "DRY_RUN=1 node scripts/news-bot.mjs"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.0.9"
+  }
+}
