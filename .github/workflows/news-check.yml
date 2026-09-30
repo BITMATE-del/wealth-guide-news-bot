@@ -1,6 +1,12 @@
 name: Wealth Guide News Check
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "package.json"
+      - ".github/workflows/news-check.yml"
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
