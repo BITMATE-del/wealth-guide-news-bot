@@ -172,26 +172,133 @@ function truncate(s, n = 280) {
   return v.length > n ? v.slice(0, n - 1) + "…" : v;
 }
 
+function relatedAssets(item) {
+  const t = `${item.title} ${item.description}`;
+  const related = [];
+
+  const add = (name, why) => {
+    if (!related.some((x) => x.name === name)) related.push({ name, why });
+  };
+
+  // 국내주식
+  if (/(삼성전자|메모리|반도체|HBM|D램|낸드)/i.test(t)) {
+    add("삼성전자", "메모리·반도체 업황 및 AI/HBM 수요와 직접 연관");
+    add("SK하이닉스", "HBM·메모리 가격과 AI 서버 투자 확대의 직접 수혜/영향");
+  }
+  if (/(2차전지|배터리|전기차|EV|리튬|양극재)/i.test(t)) {
+    add("LG에너지솔루션", "전기차 수요·배터리 가격·원재료 흐름에 민감");
+    add("삼성SDI", "전기차·ESS 배터리 수요와 투자 사이클에 연동");
+    add("POSCO퓨처엠", "양극재·배터리 소재 가격 및 수주 이슈와 연관");
+  }
+  if (/(조선|LNG선|선박|해운 발주)/i.test(t)) {
+    add("HD한국조선해양", "선박 발주·선가 상승·LNG선 수주와 연관");
+    add("한화오션", "대형 조선 수주와 방산·LNG선 발주 영향");
+  }
+  if (/(방산|무기|미사일|수출 계약|국방)/i.test(t)) {
+    add("한화에어로스페이스", "방산 수출·국방예산 확대와 직접 연관");
+    add("LIG넥스원", "유도무기·방산 수출 계약 변화와 연관");
+  }
+  if (/(원전|SMR|원자력)/i.test(t)) {
+    add("두산에너빌리티", "원전·SMR 설비 수주 및 정책 변화와 연관");
+  }
+  if (/(바이오|신약|임상|FDA|의약품)/i.test(t)) {
+    add("삼성바이오로직스", "바이오 위탁생산 수요·글로벌 제약 투자와 연관");
+    add("셀트리온", "바이오시밀러·의약품 승인 및 수출 이슈와 연관");
+  }
+  if (/(NAVER|네이버|AI 서비스|검색 광고|플랫폼)/i.test(t)) {
+    add("NAVER", "플랫폼·광고·AI 서비스 성장과 직접 연관");
+  }
+  if (/(카카오|메신저|플랫폼 규제)/i.test(t)) {
+    add("카카오", "플랫폼 규제·광고·콘텐츠 사업 변화와 연관");
+  }
+
+  // 미국/글로벌
+  if (/(nvidia|엔비디아|ai chip|gpu|hbm)/i.test(t)) {
+    add("엔비디아", "AI GPU 수요와 데이터센터 투자 확대의 핵심 종목");
+    add("SK하이닉스", "엔비디아향 HBM 공급 기대와 밀접한 연관");
+  }
+  if (/(tesla|테슬라|ev demand|전기차 수요)/i.test(t)) {
+    add("테슬라", "글로벌 전기차 수요·가격정책·마진 변화와 직접 연관");
+    add("LG에너지솔루션", "전기차 배터리 수요 변화에 간접 영향");
+  }
+
+  // 코인
+  if (/(bitcoin|btc|비트코인)/i.test(t)) add("BTC", "비트코인 현물 수급·ETF·거시 유동성 변화와 직접 연관");
+  if (/(ethereum|eth|이더리움)/i.test(t)) add("ETH", "이더리움 네트워크·ETF·스테이킹·디파이 수요와 연관");
+  if (/(solana|sol|솔라나)/i.test(t)) add("SOL", "솔라나 생태계·네트워크 사용량·밈코인/디앱 활동과 연관");
+  if (/(xrp|리플|ripple)/i.test(t)) add("XRP", "리플 관련 규제·소송·결제 사업 이슈와 직접 연관");
+  if (/(stablecoin|스테이블코인|usdt|usdc|depeg|디페깅)/i.test(t)) {
+    add("USDT", "스테이블코인 유동성·페깅 안정성 변화와 연관");
+    add("USDC", "달러 연동 유동성과 거래소·디파이 수요에 연관");
+  }
+  if (/(exchange hack|거래소 해킹|hack|exploit|해킹|탈취)/i.test(t)) {
+    add("BTC", "시장 전반 위험회피 심리와 유동성 위축에 영향 가능");
+    add("ETH", "온체인 자금 이동과 디파이 심리 위축에 영향 가능");
+  }
+
+  // 거시 변수
+  if (/(금리 인하|rate cut|dovish|완화적)/i.test(t)) {
+    add("나스닥", "할인율 하락 기대가 성장주 밸류에이션에 우호적일 수 있음");
+    add("BTC", "유동성 확대 기대와 위험자산 선호에 연동");
+  }
+  if (/(금리 인상|rate hike|hawkish|긴축)/i.test(t)) {
+    add("나스닥", "할인율 상승 시 성장주 변동성이 커질 수 있음");
+    add("BTC", "유동성 축소 우려로 위험자산 변동성이 확대될 수 있음");
+  }
+
+  return related.slice(0, 5);
+}
+
+function relationBlock(item) {
+  const rel = relatedAssets(item);
+  if (!rel.length) {
+    return [
+      "<b>🔗 관련 자산</b>",
+      "• 직접 연관 종목·코인이 뚜렷하지 않은 거시/정책 이슈입니다.",
+      "• 지수·환율·금리 반응을 우선 확인하세요."
+    ].join("\n");
+  }
+  return [
+    "<b>🔗 관련주·관련코인</b>",
+    ...rel.map((x) => `• <b>${escapeHtml(x.name)}</b> — ${escapeHtml(x.why)}`)
+  ].join("\n");
+}
+
 function buildMessage(item, points) {
   const importance = points >= 11 ? "매우 높음" : "높음";
   const area = classify(item);
-  const description = truncate(item.description || "세부 내용은 원문에서 확인할 수 있습니다.", 250);
+  const description = truncate(item.description || "세부 내용은 원문에서 확인할 수 있습니다.", 260);
+  const category =
+    item.label?.includes("국내") ? "🇰🇷 국내시장" :
+    item.label?.includes("코인") ? "₿ 디지털자산" :
+    item.label?.includes("미국") ? "🇺🇸 미국증시" :
+    item.label?.includes("경제") ? "🌐 경제" :
+    "🌐 글로벌";
+
   return [
-    "🚨 <b>부의 길잡이 | 주요 시장속보</b>",
+    "━━━━━━━━━━━━━━━━━━",
+    "🧭 <b>부의 길잡이 | MARKET BRIEF</b>",
+    "<i>부의 방향을 찾다</i>",
+    "━━━━━━━━━━━━━━━━━━",
     "",
-    `<b>[${importance}] ${escapeHtml(item.title)}</b>`,
+    `<b>${category}</b>  |  <b>중요도 ${importance}</b>`,
     "",
+    `📰 <b>${escapeHtml(item.title)}</b>`,
+    "",
+    "<b>📌 핵심 요약</b>",
     escapeHtml(description),
     "",
-    `<b>영향 영역</b>  ${escapeHtml(area)}`,
-    `<b>체크포인트</b>  ${escapeHtml(impactHint(item))}`,
+    `<b>📊 영향 영역</b>  ${escapeHtml(area)}`,
     "",
-    `<a href="${escapeHtml(item.link)}">원문 확인</a>`,
+    relationBlock(item),
     "",
-    "🧭 <b>부의 길잡이</b>",
-    "<i>부의 방향을 찾다</i>",
+    "<b>👀 체크포인트</b>",
+    escapeHtml(impactHint(item)),
     "",
-    "※ 시장 영향에 대한 문구는 공개 뉴스 기반 참고용 분석이며 투자 권유가 아닙니다."
+    `🔎 <a href="${escapeHtml(item.link)}">원문 확인</a>`,
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    "※ 관련주·관련코인 표시는 뉴스와의 사업·수급·정책 연관성을 설명한 참고 정보이며, 매수·매도 추천이 아닙니다."
   ].join("\n");
 }
 
