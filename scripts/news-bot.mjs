@@ -104,7 +104,7 @@ function score(item) {
 }
 
 function classify(item) {
-  const t = `${item.title} ${item.description}`;
+  const t = `${item.title} ${item.description} ${item.originalTitle || ""} ${item.originalDescription || ""}`;
   const tags = [];
   if (/(bitcoin|btc|ethereum|eth|crypto|코인|비트코인|이더리움|거래소|stablecoin|스테이블)/i.test(t)) tags.push("코인");
   if (/(nasdaq|s&p|dow|stock|equity|kospi|kosdaq|주식|증시|코스피|코스닥|earnings|실적|공시|수주|상한가|하한가|거래정지)/i.test(t)) tags.push("주식");
@@ -172,8 +172,59 @@ function truncate(s, n = 280) {
   return v.length > n ? v.slice(0, n - 1) + "…" : v;
 }
 
+function hasEnoughKorean(text = "") {
+  const s = cleanText(text);
+  if (!s) return true;
+  const korean = (s.match(/[가-힣]/g) || []).length;
+  const letters = (s.match(/[A-Za-z가-힣]/g) || []).length || 1;
+  return korean >= 4 || korean / letters >= 0.25;
+}
+
+async function translateToKorean(text = "") {
+  const src = cleanText(text);
+  if (!src || hasEnoughKorean(src)) return src;
+
+  const clipped = src.slice(0, 1200);
+  const url =
+    "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ko&dt=t&q=" +
+    encodeURIComponent(clipped);
+
+  try {
+    const res = await fetch(url, {
+      headers: { "user-agent": "WealthGuideNewsBot/1.0" },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!res.ok) throw new Error(`translate HTTP ${res.status}`);
+    const data = await res.json();
+    const translated = Array.isArray(data?.[0])
+      ? data[0].map((x) => x?.[0] || "").join("")
+      : "";
+    return cleanText(translated) || src;
+  } catch (err) {
+    console.warn("Translation failed:", err?.message || err);
+    return src;
+  }
+}
+
+async function localizeItem(item) {
+  const originalTitle = item.title || "";
+  const originalDescription = item.description || "";
+  const [title, description] = await Promise.all([
+    translateToKorean(originalTitle),
+    translateToKorean(originalDescription)
+  ]);
+
+  return {
+    ...item,
+    originalTitle,
+    originalDescription,
+    title,
+    description
+  };
+}
+
 function relatedAssets(item) {
-  const t = `${item.title} ${item.description}`;
+  const t = `${item.title} ${item.description} ${item.originalTitle || ""} ${item.originalDescription || ""}`;
   const related = [];
 
   const add = (name, why) => {
@@ -185,7 +236,7 @@ function relatedAssets(item) {
     add("삼성전자", "메모리·반도체 업황 및 AI/HBM 수요와 직접 연관");
     add("SK하이닉스", "HBM·메모리 가격과 AI 서버 투자 확대의 직접 수혜/영향");
   }
-  if (/(2차전지|배터리|전기차|EV|리튬|양극재)/i.test(t)) {
+  if (/(2차전지|배터리|전기차|\bEV\b|리튬|양극재)/i.test(t)) {
     add("LG에너지솔루션", "전기차 수요·배터리 가격·원재료 흐름에 민감");
     add("삼성SDI", "전기차·ESS 배터리 수요와 투자 사이클에 연동");
     add("POSCO퓨처엠", "양극재·배터리 소재 가격 및 수주 이슈와 연관");
@@ -361,9 +412,10 @@ async function main() {
   console.log(`Fetched ${items.length} items; ${candidates.length} important unseen; sending ${chosen.length}.`);
 
   for (const item of chosen) {
-    await sendTelegram(buildMessage(item, item.points));
+    const localized = await localizeItem(item);
+    await sendTelegram(buildMessage(localized, localized.points));
     sent.add(item.id);
-    console.log(`Sent [${item.points}] ${item.title}`);
+    console.log(`Sent [${item.points}] ${localized.title}`);
   }
 
   if (chosen.length) {
