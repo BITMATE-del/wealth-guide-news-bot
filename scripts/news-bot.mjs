@@ -5,7 +5,7 @@ import { XMLParser } from "fast-xml-parser";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const DRY_RUN = process.env.DRY_RUN === "1";
-const THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || 5);
+const THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || 6);
 const MAX_ALERTS = Number(process.env.MAX_ALERTS_PER_RUN || 4);
 const STATE_PATH = new URL("../state/news-state.json", import.meta.url);
 
@@ -184,35 +184,76 @@ async function translateToKorean(text = "") {
   const src = cleanText(text);
   if (!src || hasEnoughKorean(src)) return src;
 
-  const clipped = src.slice(0, 1200);
-  const url =
-    "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ko&dt=t&q=" +
-    encodeURIComponent(clipped);
+  const clipped = src.slice(0, 900);
 
+  // 1차: Google 번역 비공식 엔드포인트
   try {
+    const url =
+      "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ko&dt=t&q=" +
+      encodeURIComponent(clipped);
+
+    const res = await fetch(url, {
+      headers: { "user-agent": "Mozilla/5.0 WealthGuideNewsBot/1.0" },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const translated = Array.isArray(data?.[0])
+        ? data[0].map((x) => x?.[0] || "").join("")
+        : "";
+      const cleaned = cleanText(translated);
+      if (cleaned && hasEnoughKorean(cleaned)) return cleaned;
+    }
+  } catch (err) {
+    console.warn("Google translation failed:", err?.message || err);
+  }
+
+  // 2차: MyMemory 공개 번역 API fallback
+  try {
+    const url =
+      "https://api.mymemory.translated.net/get?q=" +
+      encodeURIComponent(clipped) +
+      "&langpair=en|ko";
+
     const res = await fetch(url, {
       headers: { "user-agent": "WealthGuideNewsBot/1.0" },
       signal: AbortSignal.timeout(10000)
     });
-    if (!res.ok) throw new Error(`translate HTTP ${res.status}`);
-    const data = await res.json();
-    const translated = Array.isArray(data?.[0])
-      ? data[0].map((x) => x?.[0] || "").join("")
-      : "";
-    return cleanText(translated) || src;
+
+    if (res.ok) {
+      const data = await res.json();
+      const translated = cleanText(data?.responseData?.translatedText || "");
+      if (translated && hasEnoughKorean(translated)) return translated;
+    }
   } catch (err) {
-    console.warn("Translation failed:", err?.message || err);
-    return src;
+    console.warn("Fallback translation failed:", err?.message || err);
   }
+
+  return "";
 }
 
 async function localizeItem(item) {
   const originalTitle = item.title || "";
   const originalDescription = item.description || "";
-  const [title, description] = await Promise.all([
+
+  const [translatedTitle, translatedDescription] = await Promise.all([
     translateToKorean(originalTitle),
     translateToKorean(originalDescription)
   ]);
+
+  const title = hasEnoughKorean(originalTitle)
+    ? originalTitle
+    : translatedTitle;
+
+  const description = hasEnoughKorean(originalDescription)
+    ? originalDescription
+    : (translatedDescription || "해외 원문 기사입니다. 제목을 한국어로 번역했으며 세부 내용은 원문에서 확인할 수 있습니다.");
+
+  // 영문 제목 번역이 끝내 실패하면 영문 그대로 발송하지 않음
+  if (!title || !hasEnoughKorean(title)) {
+    return { ...item, originalTitle, originalDescription, skipReason: "translation_failed" };
+  }
 
   return {
     ...item,
@@ -413,6 +454,12 @@ async function main() {
 
   for (const item of chosen) {
     const localized = await localizeItem(item);
+
+    if (localized.skipReason === "translation_failed") {
+      console.warn(`Skipped English article because Korean translation failed: ${item.title}`);
+      continue;
+    }
+
     await sendTelegram(buildMessage(localized, localized.points));
     sent.add(item.id);
     console.log(`Sent [${item.points}] ${localized.title}`);
