@@ -1,0 +1,31 @@
+name: Telegram Sync checks
+on:
+  pull_request:
+    paths:
+      - 'telegram-sync/**'
+      - '.github/workflows/telegram-sync-check.yml'
+  push:
+    paths:
+      - 'telegram-sync/**'
+      - '.github/workflows/telegram-sync-check.yml'
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python compile
+        run: python -m compileall -q telegram-sync/app
+      - name: JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html=Path('telegram-sync/static/index.html').read_text()
+          script=re.findall(r'<script>(.*?)</script>',html,re.S)
+          assert len(script)==1
+          Path('/tmp/telegram-sync.js').write_text(script[0])
+          PY
+          node --check /tmp/telegram-sync.js
