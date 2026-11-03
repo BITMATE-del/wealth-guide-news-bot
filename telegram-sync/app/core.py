@@ -120,6 +120,12 @@ class SyncEngine:
         return result
     async def on_message(self, watcher_id, event):
         if not event.chat_id or not event.sender_id: return
+        # A message already delivered by this service must not trigger another forwarding route.
+        with SessionLocal() as db:
+            echo = db.execute(select(Delivery.id).join(Route, Delivery.route_id == Route.id).where(
+                Route.target_chat == event.chat_id, Delivery.target_id == event.id,
+                Delivery.status == "sent").limit(1)).first()
+            if echo: return
         with SessionLocal() as db:
             routes = list(db.scalars(select(Route).where(Route.active == True,
                 Route.watcher_id == watcher_id, Route.source_chat == event.chat_id)))
