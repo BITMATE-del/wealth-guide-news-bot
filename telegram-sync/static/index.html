@@ -275,6 +275,31 @@
       background:#fbfcff;
     }
     .target-list{display:grid;gap:12px;max-height:420px;overflow:auto;padding-right:4px}
+    .settings-toolbar{display:flex;align-items:center;gap:12px;margin:10px 0 14px}
+    .settings-toolbar input{flex:1;min-width:0}
+    .settings-toolbar .badge{white-space:nowrap}
+    .target-item{padding:12px 14px}
+    .target-check{margin-bottom:0}
+    .target-check .target-name{flex:1}
+    .target-controls{margin-top:11px;margin-left:30px}
+    .target-item.disabled{opacity:.58;background:#f8fafd}
+    .target-meta{font-size:12px;color:var(--sub);font-weight:500;margin-left:8px}
+    .group-card{border:1px solid var(--border);border-radius:16px;overflow:hidden;background:#fff}
+    .group-heading{padding:16px 18px;display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f9fbff}
+    .group-heading h4{font-size:17px;margin:0 0 7px}
+    .group-heading .help{margin:0}
+    .group-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .group-actions .btn,.route-actions .btn{padding:8px 12px;font-size:12px;border-radius:10px}
+    .group-rows{padding:0 16px}
+    .route-row{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:14px 2px;border-top:1px solid var(--border)}
+    .route-row:first-child{border-top:0}
+    .route-details{flex:1;min-width:0}
+    .route-details strong{display:block;font-size:14px;margin-bottom:5px}
+    .route-details .help{margin:0}
+    .route-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .route-editor{border-top:1px solid var(--border);background:#f8faff;padding:12px 16px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+    .route-editor select{max-width:220px}
+    @media(max-width:700px){.group-heading,.route-row{align-items:flex-start;flex-direction:column}.route-actions{width:100%}.settings-toolbar{align-items:stretch}.route-editor select{max-width:100%}}
     .target-item{border:1px solid var(--border);border-radius:16px;padding:16px;background:#fff}
     .target-check{display:flex;gap:12px;align-items:center;margin-bottom:12px}
     .target-check input{width:18px;height:18px}
@@ -481,10 +506,15 @@
               </div>
               <div class="field">
                 <label class="label" for="source">메인방</label>
-                <select id="source"></select>
+                <select id="source" onchange="updateTargetOptions()"></select>
               </div>
               <div class="field full">
-                <label class="label">전달할 서브방</label>
+                <label class="label" for="targetSearch">전달할 서브방</label>
+                <div class="settings-toolbar">
+                  <input id="targetSearch" type="text" placeholder="서브방 이름 검색" oninput="filterTargets()">
+                  <span class="badge" id="selectedTargetCount">0개 선택</span>
+                </div>
+                <div class="help">메인방은 자동 제외됩니다. 이미 연결된 그룹은 중복 등록할 수 없습니다.</div>
                 <div class="target-list" id="targets"></div>
               </div>
             </div>
@@ -493,7 +523,11 @@
 
           <div class="panel">
             <h3 class="section-title" style="font-size:20px">현재 전달 설정</h3>
-            <div class="route-list" id="routeList" style="margin-top:16px"></div>
+            <div class="settings-toolbar" style="margin-top:16px">
+              <input id="routeSearch" type="text" placeholder="메인방 또는 서브방 검색" oninput="renderCurrentRoutes()">
+              <span class="badge" id="routeCount">0개 설정</span>
+            </div>
+            <div class="route-list" id="routeList"></div>
           </div>
         </section>
 
@@ -515,7 +549,7 @@
   <div id="notice"></div>
 
   <script>
-    let csrf="", accounts=[], routes=[], token="", dialogs=[];
+    let csrf="", accounts=[], routes=[], token="", dialogs=[], chatNames={}, targetDialogs=[], routeEditorId=null;
     const $ = (id) => document.getElementById(id);
 
     function safe(s){
@@ -650,20 +684,12 @@
         ).join("") : renderEmpty('등록된 계정이 없습니다. 먼저 전화번호 인증 또는 세션 파일로 계정을 등록하세요.');
 
         const options = accounts.filter(a=>a.connected).map(a => '<option value="'+ a.id +'">'+ safe(a.label) +'</option>').join("");
+        const chosenWatcher=$("watcher").value;
         $("watcher").innerHTML = options || '';
+        if(accounts.some(a=>a.connected&&String(a.id)===chosenWatcher))$("watcher").value=chosenWatcher;
 
-        $("routeList").innerHTML = routes.length ? routes.map(r =>
-          '<div class="list-item">' +
-            '<div>' +
-              '<div class="list-item-title">메인방 '+ r.source_chat +' → '+ r.target_chat +'</div>' +
-              '<div class="list-item-sub">감지 계정: '+ accountName(r.watcher_id) +' · 발신 계정: '+ (r.mode === 'same' ? '원본 작성자 계정' : accountName(r.fixed_id)) +'</div>' +
-            '</div>' +
-            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
-              '<span class="badge">'+ (r.active ? '작동 중' : '중지됨') +'</span>' +
-              '<button class="btn" onclick="switchRoute('+ r.id +','+ (!r.active) +')">'+ (r.active ? '중지' : '시작') +'</button>' +
-            '</div>' +
-          '</div>'
-        ).join("") : renderEmpty('아직 등록된 전달 규칙이 없습니다. 메인방과 서브방을 연결해 주세요.');
+        chatNames=await api("/chat-names");
+        renderCurrentRoutes();
 
         const logs = await api("/logs");
         $("logList").innerHTML = logs.length ? logs.map(log =>
@@ -689,6 +715,87 @@
       const el=$("codeRequestStatus");
       el.className="code-request-status "+kind;
       el.textContent=message;
+    }
+
+    function groupName(id){return chatNames[String(id)]||("그룹 "+id)}
+    function renderCurrentRoutes(){
+      const filter=($("routeSearch")?.value||"").trim().toLocaleLowerCase();
+      const grouped=new Map();
+      for(const route of routes){
+        const key=route.watcher_id+":"+route.source_chat;
+        if(!grouped.has(key))grouped.set(key,{watcher:route.watcher_id,source:route.source_chat,items:[]});
+        grouped.get(key).items.push(route);
+      }
+      const groups=[...grouped.values()].sort((a,b)=>groupName(a.source).localeCompare(groupName(b.source),'ko'));
+      const connected=accounts.filter(a=>a.connected);
+      const html=groups.map(group=>{
+        const visible=group.items.filter(r=>(groupName(group.source)+" "+groupName(r.target_chat)+" "+accountName(r.fixed_id)).toLocaleLowerCase().includes(filter));
+        if(!visible.length)return "";
+        const allIds=group.items.map(r=>r.id);
+        const activeCount=group.items.filter(r=>r.active).length;
+        return '<div class="group-card">'+
+          '<div class="group-heading"><div><h4>'+safe(groupName(group.source))+'</h4>'+
+          '<p class="help">감지 계정: '+accountName(group.watcher)+' · 연결 '+group.items.length+'개 · 작동 중 '+activeCount+'개</p></div>'+
+          '<div class="group-actions"><button class="btn" onclick="bulkToggle('+JSON.stringify(allIds)+',true)">전체 시작</button>'+
+          '<button class="btn" onclick="bulkToggle('+JSON.stringify(allIds)+',false)">전체 중지</button></div></div>'+
+          '<div class="group-rows">'+visible.map(r=>
+            '<div class="route-row"><div class="route-details"><strong>'+safe(groupName(r.target_chat))+'</strong>'+
+              '<p class="help">발신: '+(r.mode==="same"?"원본 작성자 계정":accountName(r.fixed_id))+' · ID '+r.target_chat+'</p></div>'+
+              '<div class="route-actions"><span class="status '+(r.active?"ok":"warn")+'">'+(r.active?"작동 중":"중지됨")+'</span>'+
+              '<button class="btn" onclick="toggleRouteEditor('+r.id+')">편집</button>'+
+              '<button class="btn" onclick="switchRoute('+r.id+','+(!r.active)+')">'+(r.active?"중지":"시작")+'</button>'+
+              '<button class="btn" style="color:var(--danger)" onclick="removeRoute('+r.id+')">삭제</button></div></div>'+
+            (routeEditorId===r.id?'<div class="route-editor"><select id="editMode'+r.id+'" onchange="toggleEditSender('+r.id+')">'+
+              '<option value="same" '+(r.mode==="same"?"selected":"")+'>원본 작성자 계정</option>'+
+              '<option value="fixed" '+(r.mode==="fixed"?"selected":"")+'>지정 계정</option></select>'+
+              '<select id="editSender'+r.id+'" class="'+(r.mode==="fixed"?"":"hide")+'">'+
+              connected.map(a=>'<option value="'+a.id+'" '+(a.id===r.fixed_id?"selected":"")+'>'+safe(a.label)+'</option>').join("")+'</select>'+
+              '<button class="btn primary" onclick="saveRouteEdit('+r.id+')">저장</button>'+
+              '<button class="btn" onclick="toggleRouteEditor(null)">취소</button></div>':"")
+          ).join("")+'</div></div>';
+      }).join("");
+      $("routeList").innerHTML=html||renderEmpty("검색 조건에 맞는 전달 설정이 없습니다.");
+      $("routeCount").textContent=routes.length+"개 설정";
+    }
+    function toggleRouteEditor(id){routeEditorId=routeEditorId===id?null:id;renderCurrentRoutes()}
+    function toggleEditSender(id){$("editSender"+id).classList.toggle("hide",$("editMode"+id).value!=="fixed")}
+    async function saveRouteEdit(id){
+      await run(async()=>{
+        const mode=$("editMode"+id).value;
+        const fixed=Number($("editSender"+id).value);
+        if(mode==="fixed"&&!fixed)throw Error("발신 계정을 선택하세요");
+        await api("/routes/"+id,"PUT",{mode,fixed_id:mode==="fixed"?fixed:null});
+        routeEditorId=null;notice("전달 설정을 수정했습니다");await refresh();
+      });
+    }
+    async function bulkToggle(ids,enabled){
+      if(!ids.length)return;
+      await run(async()=>{await api("/routes/bulk","POST",{route_ids:ids,enabled});notice(enabled?"전체 시작 완료":"전체 중지 완료");await refresh()});
+    }
+    async function removeRoute(id){
+      const r=routes.find(x=>x.id===id);
+      if(!r||!confirm("["+groupName(r.target_chat)+"] 전달 설정을 삭제할까요? 해당 규칙의 전송 기록도 삭제됩니다."))return;
+      await run(async()=>{await api("/routes/"+id,"DELETE");notice("전달 설정을 삭제했습니다");await refresh()});
+    }
+    function updateTargetOptions(){
+      const src=String($("source").value),watcher=Number($("watcher").value);
+      document.querySelectorAll(".target-item").forEach(item=>{
+        const check=item.querySelector(".targetCheck"),target=String(check.value);
+        const duplicate=routes.some(r=>r.watcher_id===watcher&&String(r.source_chat)===src&&String(r.target_chat)===target);
+        const same=target===src;
+        check.disabled=same||duplicate;
+        if(check.disabled)check.checked=false;
+        item.classList.toggle("disabled",same||duplicate);
+        item.querySelector(".target-meta").textContent=same?"메인방":duplicate?"이미 연결됨":"";
+      });
+      filterTargets();
+    }
+    function filterTargets(){
+      const q=($("targetSearch")?.value||"").trim().toLocaleLowerCase();
+      const items=[...document.querySelectorAll(".target-item")];
+      items.forEach(item=>{item.style.display=item.dataset.search.includes(q)?"":"none"});
+      const selected=items.filter(item=>item.querySelector(".targetCheck").checked).length;
+      $("selectedTargetCount").textContent=selected+"개 선택";
     }
 
     async function sendCode(){
@@ -796,45 +903,30 @@
 
     async function loadSource(){
       await run(async()=>{
-        const id = $("watcher").value;
-        if(!id){
-          $("targets").innerHTML = renderEmpty('메인방을 읽을 계정을 선택하세요.');
-          return;
-        }
-        const watcherDialogs = await api('/accounts/' + id + '/chats');
-        dialogs = watcherDialogs;
-        $("source").innerHTML = watcherDialogs.map(d => '<option value="'+ d.id +'">'+ safe(d.name) +'</option>').join('');
-        const connected = accounts.filter(a=>a.connected);
-        const discovered = new Map(watcherDialogs.map(d=>[String(d.id),d]));
-        const results = await Promise.allSettled(connected.filter(a=>String(a.id)!==id).map(a=>
-          api('/accounts/'+a.id+'/chats')
-        ));
-        for(const result of results){
-          if(result.status === 'fulfilled'){
-            for(const group of result.value){
-              if(!discovered.has(String(group.id)))discovered.set(String(group.id),group);
-            }
-          }
-        }
-        const choices = connected.map(a => '<option value="'+ a.id +'">'+ safe(a.label) +'</option>').join('');
-        $("targets").innerHTML = [...discovered.values()].map(d =>
-          '<div class="target-item">' +
-            '<label class="target-check">' +
-              '<input type="checkbox" class="targetCheck" value="'+ d.id +'">' +
-              '<span class="target-name">'+ safe(d.name) +'</span>' +
-            '</label>' +
-            '<div class="target-controls">' +
-              '<select class="targetMode" onchange="toggleTargetSender(this)">' +
-                '<option value="same">원본 작성자 계정</option>' +
-                '<option value="fixed">지정 계정</option>' +
-              '</select>' +
-              '<select class="targetSender hide">'+ choices +'</select>' +
-            '</div>' +
-          '</div>'
-        ).join('') || renderEmpty('연결된 계정에서 접근 가능한 그룹이 없습니다.');
-        if(results.some(r=>r.status === 'rejected')){
-          notice('일부 계정의 그룹을 불러오지 못했습니다. 연결 상태를 확인하세요.');
-        }
+        const id=$("watcher").value;
+        if(!id){$("targets").innerHTML=renderEmpty("메인방을 읽을 계정을 선택하세요");return}
+        const chosenSource=$("source").value;
+        const watcherDialogs=await api("/accounts/"+id+"/chats");
+        dialogs=watcherDialogs;
+        $("source").innerHTML=watcherDialogs.map(d=>'<option value="'+d.id+'">'+safe(d.name)+'</option>').join("");
+        if(watcherDialogs.some(d=>String(d.id)===chosenSource))$("source").value=chosenSource;
+        const connected=accounts.filter(a=>a.connected);
+        const discovered=new Map(watcherDialogs.map(d=>[String(d.id),d]));
+        const results=await Promise.allSettled(connected.filter(a=>String(a.id)!==id).map(a=>api("/accounts/"+a.id+"/chats")));
+        for(const result of results)if(result.status==="fulfilled")
+          for(const group of result.value)if(!discovered.has(String(group.id)))discovered.set(String(group.id),group);
+        targetDialogs=[...discovered.values()].sort((a,b)=>a.name.localeCompare(b.name,'ko')||String(a.id).localeCompare(String(b.id)));
+        const choices=connected.map(a=>'<option value="'+a.id+'">'+safe(a.label)+'</option>').join("");
+        $("targets").innerHTML=targetDialogs.map(d=>
+          '<div class="target-item" data-search="'+safe(d.name.toLocaleLowerCase())+'">'+
+          '<label class="target-check"><input type="checkbox" class="targetCheck" onchange="filterTargets()" value="'+d.id+'">'+
+          '<span class="target-name">'+safe(d.name)+'<span class="target-meta"></span></span></label>'+
+          '<div class="target-controls"><select class="targetMode" onchange="toggleTargetSender(this)">'+
+          '<option value="same">원본 작성자 계정</option><option value="fixed">지정 계정</option></select>'+
+          '<select class="targetSender hide">'+choices+'</select></div></div>'
+        ).join("")||renderEmpty("연결된 계정에서 접근 가능한 그룹이 없습니다.");
+        chatNames=await api("/chat-names");renderCurrentRoutes();updateTargetOptions();
+        if(results.some(r=>r.status==="rejected"))notice("일부 계정의 그룹을 불러오지 못했습니다");
       });
     }
 
@@ -844,28 +936,19 @@
 
     async function createRoutes(){
       await run(async()=>{
-        const selected = [...document.querySelectorAll('.targetCheck:checked')];
-        if(!selected.length) throw Error('전달할 서브방을 선택하세요');
-        const source = Number($("source").value);
-        const watcher = Number($("watcher").value);
-        let count = 0;
+        const selected=[...document.querySelectorAll(".targetCheck:checked:not(:disabled)")];
+        if(!selected.length)throw Error("전달할 서브방을 선택하세요");
+        const src=Number($("source").value),watcher=Number($("watcher").value);
+        let count=0;
         for(const box of selected){
-          const target = Number(box.value);
-          if(source === target) continue;
-          const item = box.closest('.target-item');
-          const mode = item.querySelector('.targetMode').value;
-          const fixed = Number(item.querySelector('.targetSender').value);
-          await api('/routes','POST',{
-            watcher_id:watcher,
-            source_chat:source,
-            target_chat:target,
-            mode,
-            fixed_id:mode === 'fixed' ? fixed : null
-          });
+          const target=Number(box.value);
+          if(src===target||routes.some(r=>r.watcher_id===watcher&&r.source_chat===src&&r.target_chat===target))continue;
+          const item=box.closest(".target-item"),mode=item.querySelector(".targetMode").value;
+          const fixed=Number(item.querySelector(".targetSender").value);
+          await api("/routes","POST",{watcher_id:watcher,source_chat:src,target_chat:target,mode,fixed_id:mode==="fixed"?fixed:null});
           count++;
         }
-        notice(count + '개 그룹 연결 완료');
-        await refresh();
+        notice(count+"개 그룹 연결 완료");await refresh();
       });
     }
 
