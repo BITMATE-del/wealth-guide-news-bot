@@ -498,6 +498,28 @@
           </div>
 
           <div class="panel">
+            <div class="section-head" style="margin-bottom:12px">
+              <div><h3 class="section-title" style="font-size:20px">전달 속도 설정</h3>
+              <p class="section-sub">메시지 길이에 따른 추정 입력 시간을 적용해 발신 계정별로 순차 전송합니다.</p></div>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label class="label" for="deliveryPace">전달 간격</label>
+                <select id="deliveryPace" onchange="updatePaceHint()">
+                  <option value="off">제한 없음 (기존 방식)</option>
+                  <option value="fast">빠르게 · 약 3~12초</option>
+                  <option value="normal">보통 · 약 6~25초 (권장)</option>
+                  <option value="relaxed">여유 있게 · 약 10~45초</option>
+                </select>
+              </div>
+              <div class="field" style="justify-content:flex-end">
+                <button class="btn primary" onclick="saveDeliveryPace()">전달 속도 저장</button>
+              </div>
+            </div>
+            <div class="note-box" id="paceHint" style="margin-top:12px">메시지 길이에 따라 대기 시간이 달라집니다. 실제 사람의 타이핑 시간을 측정하는 기능은 아닙니다.</div>
+          </div>
+
+          <div class="panel">
             <h3 class="section-title" style="font-size:20px">새 전달 설정</h3>
             <div class="form-grid" style="margin-top:16px">
               <div class="field">
@@ -688,6 +710,7 @@
         $("watcher").innerHTML = options || '';
         if(accounts.some(a=>a.connected&&String(a.id)===chosenWatcher))$("watcher").value=chosenWatcher;
 
+        await loadDeliveryPace();
         chatNames=await api("/chat-names");
         renderCurrentRoutes();
 
@@ -796,6 +819,30 @@
       items.forEach(item=>{item.style.display=item.dataset.search.includes(q)?"":"none"});
       const selected=items.filter(item=>item.querySelector(".targetCheck").checked).length;
       $("selectedTargetCount").textContent=selected+"개 선택";
+    }
+
+    function updatePaceHint(){
+      const labels={
+        off:"전달 간격을 별도로 두지 않습니다. 텔레그램 전송 제한은 여전히 적용됩니다.",
+        fast:"짧은 글은 약 3초, 긴 글은 최대 12초 간격입니다.",
+        normal:"짧은 글은 약 6초, 긴 글은 최대 25초 간격입니다. 메시지 길이에 따라 자동 계산됩니다.",
+        relaxed:"짧은 글은 약 10초, 긴 글은 최대 45초 간격입니다."
+      };
+      $("paceHint").textContent=(labels[$("deliveryPace").value]||labels.normal)+
+        " 같은 발신 계정의 전송을 순서대로 처리합니다. 실제 사람의 타이핑 시간을 측정하는 기능은 아닙니다.";
+    }
+    async function loadDeliveryPace(){
+      const data=await api("/settings/delivery");
+      $("deliveryPace").value=data.mode||"normal";
+      updatePaceHint();
+    }
+    async function saveDeliveryPace(){
+      await run(async()=>{
+        const mode=$("deliveryPace").value;
+        await api("/settings/delivery","PUT",{mode});
+        notice("전달 속도 설정을 저장했습니다");
+        updatePaceHint();
+      });
     }
 
     async function sendCode(){
