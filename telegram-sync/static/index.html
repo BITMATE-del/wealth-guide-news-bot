@@ -695,7 +695,7 @@
       const button=$("sendCodeButton");
       if(button.disabled)return;
       const phone=$("phone").value.trim();
-      if(!/^\\+[1-9]\\d{7,14}$/.test(phone)){
+      if(!/^\+[1-9]\d{7,14}$/.test(phone)){
         showCodeRequestStatus("error","국가번호를 포함한 전화번호를 확인해 주세요. 예: +821012345678");
         return;
       }
