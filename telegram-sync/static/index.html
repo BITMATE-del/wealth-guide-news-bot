@@ -771,13 +771,26 @@
       await run(async()=>{
         const id = $("watcher").value;
         if(!id){
-          $("targets").innerHTML = renderEmpty('감지 계정을 먼저 선택하세요.');
+          $("targets").innerHTML = renderEmpty('메인방을 읽을 계정을 선택하세요.');
           return;
         }
-        dialogs = await api('/accounts/' + id + '/chats');
-        $("source").innerHTML = dialogs.map(d => '<option value="'+ d.id +'">'+ safe(d.name) +'</option>').join('');
-        const choices = accounts.filter(a=>a.connected).map(a => '<option value="'+ a.id +'">'+ safe(a.label) +'</option>').join('');
-        $("targets").innerHTML = dialogs.length ? dialogs.map(d =>
+        const watcherDialogs = await api('/accounts/' + id + '/chats');
+        dialogs = watcherDialogs;
+        $("source").innerHTML = watcherDialogs.map(d => '<option value="'+ d.id +'">'+ safe(d.name) +'</option>').join('');
+        const connected = accounts.filter(a=>a.connected);
+        const discovered = new Map(watcherDialogs.map(d=>[String(d.id),d]));
+        const results = await Promise.allSettled(connected.filter(a=>String(a.id)!==id).map(a=>
+          api('/accounts/'+a.id+'/chats')
+        ));
+        for(const result of results){
+          if(result.status === 'fulfilled'){
+            for(const group of result.value){
+              if(!discovered.has(String(group.id)))discovered.set(String(group.id),group);
+            }
+          }
+        }
+        const choices = connected.map(a => '<option value="'+ a.id +'">'+ safe(a.label) +'</option>').join('');
+        $("targets").innerHTML = [...discovered.values()].map(d =>
           '<div class="target-item">' +
             '<label class="target-check">' +
               '<input type="checkbox" class="targetCheck" value="'+ d.id +'">' +
@@ -791,7 +804,10 @@
               '<select class="targetSender hide">'+ choices +'</select>' +
             '</div>' +
           '</div>'
-        ).join('') : renderEmpty('선택한 계정으로 접근 가능한 그룹이 없습니다.');
+        ).join('') || renderEmpty('연결된 계정에서 접근 가능한 그룹이 없습니다.');
+        if(results.some(r=>r.status === 'rejected')){
+          notice('일부 계정의 그룹을 불러오지 못했습니다. 연결 상태를 확인하세요.');
+        }
       });
     }
 
