@@ -30,6 +30,12 @@ class Route(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     __table_args__ = (UniqueConstraint("watcher_id","source_chat","target_chat", name="uq_sync_route"),)
 
+class ChatName(Base):
+    __tablename__ = "sync_chat_names"
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(300))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class Delivery(Base):
     __tablename__ = "sync_deliveries"
     id: Mapped[int] = mapped_column(primary_key=True)
