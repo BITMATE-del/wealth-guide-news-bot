@@ -1,13 +1,15 @@
-import os, re, secrets
-from datetime import datetime, timezone
+import os, re, secrets, hmac
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import select, desc, delete, or_
-from .models import SessionLocal, Account, Route, Delivery, ChatName, SyncSetting
+from .models import SessionLocal, Account, Route, Delivery, ChatName, SyncSetting, License, LicenseReset
 from .core import SyncEngine
+from .licensing import COOKIE, utcnow, aware, digest, hash_password, valid_password, license_active, get_identity, require_owner, license_summary, create_license, request_reset, request_ip
 
 engine=None
 @asynccontextmanager
@@ -34,11 +36,27 @@ async def headers(request,call_next):
     return response
 
 def authorized(request:Request):
-    if request.session.get("admin") is not True: raise HTTPException(401,"관리자 로그인이 필요합니다")
-    if request.method not in ("GET","HEAD","OPTIONS") and request.headers.get("x-csrf-token") != request.session.get("csrf"):
+    license_id=get_identity(request)
+    if request.method not in ("GET","HEAD","OPTIONS") and not secrets.compare_digest(
+        str(request.headers.get("x-csrf-token") or ""), str(request.session.get("csrf") or "missing")
+    ):
         raise HTTPException(403,"보안 확인에 실패했습니다")
+    return license_id
 
 class Login(BaseModel): password:str
+class LicenseActivate(BaseModel):
+    code:str
+    password:str
+class LicenseLogin(BaseModel):
+    code:str
+    password:str
+class IssueLicense(BaseModel):
+    label:str=""
+    days:int=Field(ge=1,le=3650)
+class ReviewReset(BaseModel):
+    approved:bool
+class BlockLicense(BaseModel):
+    blocked:bool
 class Phone(BaseModel): phone:str
 class Verify(BaseModel):
     token:str
@@ -69,7 +87,14 @@ async def health(): return {"ok":True,"service":"telegram-sync"}
 
 @app.get("/api/me")
 async def me(request:Request):
-    return {"logged_in":request.session.get("admin",False),"csrf":request.session.get("csrf","")}
+    try: license_id=get_identity(request)
+    except HTTPException:
+        return {"logged_in":False,"csrf":""}
+    result={"logged_in":True,"is_owner":license_id is None,"csrf":request.session.get("csrf","")}
+    if license_id is not None:
+        with SessionLocal() as db:
+            result["license"]=license_summary(db.get(License,license_id))
+    return result
 
 @app.post("/api/login")
 async def login(data:Login,request:Request):
@@ -83,6 +108,141 @@ async def login(data:Login,request:Request):
 @app.post("/api/logout",dependencies=[Depends(authorized)])
 async def logout(request:Request):
     request.session.clear()
+    # Keep the registered-device cookie: logging out must not lock the customer out.
+    return {"ok":True}
+
+# License keys are never stored in plaintext; the key is shown once on issue.
+# Device cookies are browser-specific credentials, not hardware serial numbers.
+_login_failures={}
+
+def check_attempts(code):
+    key=digest(code)
+    cutoff=utcnow()-timedelta(minutes=10)
+    attempts=[x for x in _login_failures.get(key,[]) if x>cutoff]
+    _login_failures[key]=attempts
+    if len(attempts)>=6:
+        raise HTTPException(429,"로그인 시도가 많습니다. 10분 후 다시 시도하세요")
+
+def failed_attempt(code):
+    _login_failures.setdefault(digest(code),[]).append(utcnow())
+
+def license_by_code(db, code):
+    return db.scalar(select(License).where(License.code_hash==digest(code.strip().upper())))
+
+def finish_customer_login(request, row, device_token):
+    request.session.clear()
+    request.session["license_id"]=row.id
+    request.session["csrf"]=secrets.token_urlsafe(32)
+    response=JSONResponse({"ok":True,"csrf":request.session["csrf"],"license":license_summary(row)})
+    if device_token:
+        response.set_cookie(COOKIE,device_token,httponly=True,secure=True,samesite="strict",path="/",max_age=63072000)
+    return response
+
+@app.post("/api/license/activate")
+async def activate_license(data:LicenseActivate,request:Request):
+    code=data.code.strip().upper()
+    check_attempts(code)
+    if len(data.password)<8 or len(data.password)>128:
+        raise HTTPException(400,"2차 비밀번호는 8~128자로 설정하세요")
+    with SessionLocal() as db:
+        row=db.scalar(select(License).where(License.code_hash==digest(code)).with_for_update())
+        if not row or row.active_at:
+            failed_attempt(code)
+            raise HTTPException(400,"등록할 수 없는 라이선스입니다")
+        if row.blocked: raise HTTPException(403,"정지된 라이선스입니다")
+        token=secrets.token_urlsafe(48)
+        row.password_hash=hash_password(data.password)
+        row.active_at=utcnow()
+        row.expires_at=utcnow()+timedelta(days=row.duration_days)
+        row.device_hash=digest(token)
+        row.device_ip=request_ip(request)
+        db.commit()
+        db.refresh(row)
+        return finish_customer_login(request,row,token)
+
+@app.post("/api/license/login")
+async def login_license(data:LicenseLogin,request:Request):
+    code=data.code.strip().upper()
+    check_attempts(code)
+    with SessionLocal() as db:
+        row=license_by_code(db,code)
+        if not row or not valid_password(data.password,row.password_hash):
+            failed_attempt(code)
+            raise HTTPException(401,"라이선스 또는 2차 비밀번호가 올바르지 않습니다")
+        if not row.active_at: raise HTTPException(403,"라이선스를 먼저 등록하세요")
+        if row.blocked: raise HTTPException(403,"정지된 라이선스입니다")
+        if not row.expires_at or aware(row.expires_at)<=utcnow():
+            raise HTTPException(403,"라이선스 이용 기간이 만료되었습니다")
+        cookie=request.cookies.get(COOKIE,"")
+        if row.device_hash:
+            if not cookie or not hmac.compare_digest(digest(cookie),row.device_hash):
+                raise HTTPException(403,"다른 기기에서 로그인할 수 없습니다. 기기 초기화를 요청하세요")
+            token=None
+        else:
+            token=secrets.token_urlsafe(48)
+            row.device_hash=digest(token)
+            row.device_ip=request_ip(request)
+            db.commit()
+            db.refresh(row)
+        return finish_customer_login(request,row,token)
+
+@app.post("/api/license/reset-request")
+async def request_license_reset(data:LicenseLogin,request:Request):
+    code=data.code.strip().upper()
+    check_attempts(code)
+    with SessionLocal() as db:
+        row=license_by_code(db,code)
+        if not row or not valid_password(data.password,row.password_hash):
+            failed_attempt(code)
+            raise HTTPException(401,"라이선스 또는 2차 비밀번호를 확인하세요")
+        if not license_active(row): raise HTTPException(403,"유효한 라이선스만 초기화를 요청할 수 있습니다")
+        reset_id=request_reset(row,request_ip(request))
+        return {"ok":True,"request_id":reset_id,"message":"기기 초기화 승인 대기 중입니다"}
+
+@app.get("/api/admin/licenses",dependencies=[Depends(authorized)])
+async def list_licenses(request:Request):
+    require_owner(request)
+    with SessionLocal() as db:
+        licenses=list(db.scalars(select(License).order_by(License.id.desc())))
+        return [license_summary(x) for x in licenses]
+
+@app.post("/api/admin/licenses",dependencies=[Depends(authorized)])
+async def issue_license(data:IssueLicense,request:Request):
+    require_owner(request)
+    code,summary=create_license(data.label,data.days)
+    return {"code":code,"license":summary}
+
+@app.patch("/api/admin/licenses/{license_id}",dependencies=[Depends(authorized)])
+async def block_license(license_id:int,data:BlockLicense,request:Request):
+    require_owner(request)
+    with SessionLocal() as db:
+        row=db.get(License,license_id)
+        if not row: raise HTTPException(404,"라이선스가 없습니다")
+        row.blocked=data.blocked
+        db.commit()
+    return {"ok":True}
+
+@app.get("/api/admin/device-resets",dependencies=[Depends(authorized)])
+async def reset_requests(request:Request):
+    require_owner(request)
+    with SessionLocal() as db:
+        rows=list(db.scalars(select(LicenseReset).where(LicenseReset.status=="pending").order_by(LicenseReset.id.desc())))
+        return [{"id":x.id,"license_id":x.license_id,"ip":x.requested_ip,"requested_at":aware(x.requested_at).isoformat()} for x in rows]
+
+@app.post("/api/admin/device-resets/{reset_id}",dependencies=[Depends(authorized)])
+async def review_device_reset(reset_id:int,data:ReviewReset,request:Request):
+    require_owner(request)
+    with SessionLocal() as db:
+        req=db.get(LicenseReset,reset_id)
+        if not req or req.status!="pending": raise HTTPException(404,"승인 대기 요청이 없습니다")
+        row=db.get(License,req.license_id)
+        if not row: raise HTTPException(404,"라이선스가 없습니다")
+        req.status="approved" if data.approved else "denied"
+        req.reviewed_at=utcnow()
+        if data.approved:
+            row.device_hash=None
+            row.device_ip=None
+        db.commit()
     return {"ok":True}
 
 @app.get("/api/accounts",dependencies=[Depends(authorized)])
