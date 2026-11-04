@@ -7,7 +7,8 @@ from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from .models import SessionLocal, Account, Route, Delivery, SyncSetting
+from .models import SessionLocal, Account, Route, Delivery, SyncSetting, License
+from .licensing import license_active
 
 log = logging.getLogger("group_sync")
 
@@ -28,6 +29,10 @@ class SyncEngine:
         with SessionLocal() as db:
             accounts = list(db.scalars(select(Account).where(Account.enabled == True)))
         for account in accounts:
+            if account.license_id is not None:
+                with SessionLocal() as db:
+                    if not license_active(db.get(License, account.license_id)):
+                        continue
             try: await self.attach(account)
             except Exception: log.exception("Account %s reconnect failed", account.id)
     async def stop(self):
@@ -48,12 +53,14 @@ class SyncEngine:
         async def handler(event):
             try: await self.on_message(watcher_id, event)
             except Exception: log.exception("Message processing failed")
-    async def save_account(self, client, label):
+    async def save_account(self, client, label, license_id=None):
         identity = await client.get_me()
         session = StringSession.save(client.session)
         with SessionLocal() as db:
             account = db.scalar(select(Account).where(Account.tg_id == identity.id))
             if account:
+                if account.license_id != license_id:
+                    raise ValueError("이 텔레그램 계정은 다른 라이선스에 이미 등록되어 있습니다")
                 account.label = label or account.label
                 account.session_encrypted = self.encrypt(session)
                 account.username = identity.username
@@ -61,7 +68,8 @@ class SyncEngine:
             else:
                 account = Account(label=label or identity.first_name or str(identity.id),
                                   tg_id=identity.id, username=identity.username,
-                                  session_encrypted=self.encrypt(session), enabled=True)
+                                  session_encrypted=self.encrypt(session), enabled=True,
+                                  license_id=license_id)
                 db.add(account)
             db.commit()
             db.refresh(account)
@@ -75,7 +83,7 @@ class SyncEngine:
             if not await c.is_user_authorized(): raise ValueError("올바른 세션이 아닙니다")
             return await self.save_account(c, label)
         finally: await c.disconnect()
-    async def import_session_file(self, filename, contents, label):
+    async def import_session_file(self, filename, contents, label, license_id=None):
         # A Telethon .session is a SQLite database containing Telegram credentials.
         # Validate it before opening it with Telethon; never keep the raw file.
         if not filename.lower().endswith(".session"):
@@ -101,11 +109,11 @@ class SyncEngine:
                 await client.connect()
                 if not await client.is_user_authorized():
                     raise ValueError("로그인이 만료되었거나 사용할 수 없는 세션입니다")
-                return await self.save_account(client, label)
+                return await self.save_account(client, label, license_id)
             finally:
                 await client.disconnect()
 
-    async def phone_start(self, phone):
+    async def phone_start(self, phone, license_id=None):
         if len(self.pending) >= 8: raise ValueError("인증 요청이 너무 많습니다")
         c = self.make_client()
         await c.connect()
@@ -114,12 +122,13 @@ class SyncEngine:
             await c.disconnect()
             raise
         token = secrets.token_urlsafe(32)
-        self.pending[token] = {"client":c,"phone":phone,"hash":sent.phone_code_hash,
+        self.pending[token] = {"client":c,"phone":phone,"hash":sent.phone_code_hash,"license_id":license_id,
                                "created":asyncio.get_running_loop().time()}
         return {"token":token}
-    async def phone_finish(self, token, code, password, label):
+    async def phone_finish(self, token, code, password, label, license_id=None):
         item = self.pending.get(token)
         if not item: raise ValueError("인증 요청을 다시 시작하세요")
+        if item["license_id"] != license_id: raise ValueError("다른 라이선스에서 요청한 인증입니다")
         if asyncio.get_running_loop().time()-item["created"] > 300:
             self.pending.pop(token,None)
             await item["client"].disconnect()
@@ -135,7 +144,7 @@ class SyncEngine:
                 if not await c.is_user_authorized():
                     if not password: return {"password_required":True,"token":token}
                     await c.sign_in(password=password)
-            result = await self.save_account(c,label)
+            result = await self.save_account(c,label,license_id)
             self.pending.pop(token,None)
             await c.disconnect()
             return result
@@ -151,12 +160,12 @@ class SyncEngine:
             if d.is_group or d.is_channel:
                 result.append({"id":d.id,"name":d.name})
         return result
-    def delivery_wait_seconds(self, message):
+    def delivery_wait_seconds(self, message, license_id=None):
         # A deterministic, adjustable reading/typing-time approximation.
         # It is not a claim about a real person's typing speed and does not
         # bypass or replace Telegram's rate limits.
         with SessionLocal() as db:
-            setting=db.get(SyncSetting,"delivery_pace")
+            setting=db.get(SyncSetting,"delivery_pace" if license_id is None else "delivery_pace:"+str(license_id))
             mode=setting.value if setting else "normal"
         text=(message.raw_text or "").strip()
         chars=len(text)
@@ -167,7 +176,7 @@ class SyncEngine:
         if mode=="fast": return float(min(12,max(3,1.5 + chars / 12)))
         return float(min(25,max(6,3 + chars / 7)))
 
-    async def pace_sender(self, sender_id, message):
+    async def pace_sender(self, sender_id, message, license_id=None):
         # Queue all sends from one Telegram account, including simultaneous
         # source messages, to avoid an immediate burst to multiple groups.
         lock=self.locks.setdefault(sender_id,asyncio.Lock())
@@ -178,7 +187,7 @@ class SyncEngine:
             wait=max(0.0,self.next_send_at.get(sender_id,now)-now)
             if wait: await asyncio.sleep(wait)
             # Reserve the next interval once the next send actually starts.
-            self.next_send_at[sender_id]=loop.time()+self.delivery_wait_seconds(message)
+            self.next_send_at[sender_id]=loop.time()+self.delivery_wait_seconds(message,license_id)
             return lock
         except BaseException:
             lock.release()
@@ -193,15 +202,21 @@ class SyncEngine:
                 Delivery.status == "sent").limit(1)).first()
             if echo: return
         with SessionLocal() as db:
+            watcher=db.get(Account,watcher_id)
+            if watcher is None or not watcher.enabled: return
+            if watcher.license_id is not None and not license_active(db.get(License, watcher.license_id)):
+                return
             routes = list(db.scalars(select(Route).where(Route.active == True,
                 Route.watcher_id == watcher_id, Route.source_chat == event.chat_id)))
+            owner_license_id=watcher.license_id
         for route in routes:
             if route.sender_filter and route.sender_filter != event.sender_id: continue
             if route.target_chat == event.chat_id: continue
             if route.mode == "fixed": sender_id = route.fixed_id
             else:
                 with SessionLocal() as db:
-                    a = db.scalar(select(Account).where(Account.tg_id == event.sender_id,Account.enabled == True))
+                    a = db.scalar(select(Account).where(Account.tg_id == event.sender_id,Account.enabled == True,
+                        Account.license_id == owner_license_id if owner_license_id is not None else Account.license_id.is_(None)))
                     sender_id = a.id if a else None
             with SessionLocal() as db:
                 item=Delivery(route_id=route.id,source_id=event.id,sender_id=sender_id)
@@ -217,7 +232,7 @@ class SyncEngine:
             try:
                 c = self.clients.get(sender_id)
                 if not c: raise ValueError("전송 계정이 연결되어 있지 않습니다")
-                pace_lock=await self.pace_sender(sender_id,event.message)
+                pace_lock=await self.pace_sender(sender_id,event.message,owner_license_id)
                 try:
                     entity = await c.get_input_entity(route.target_chat)
                     if event.message.media:
