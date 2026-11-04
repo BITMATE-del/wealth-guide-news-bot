@@ -36,6 +36,11 @@ class ChatName(Base):
     name: Mapped[str] = mapped_column(String(300))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class SyncSetting(Base):
+    __tablename__ = "sync_settings"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(String(80))
+
 class Delivery(Base):
     __tablename__ = "sync_deliveries"
     id: Mapped[int] = mapped_column(primary_key=True)
