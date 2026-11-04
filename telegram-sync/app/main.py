@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import select, desc, delete, or_
-from .models import SessionLocal, Account, Route, Delivery, ChatName
+from .models import SessionLocal, Account, Route, Delivery, ChatName, SyncSetting
 from .core import SyncEngine
 
 engine=None
@@ -53,6 +53,7 @@ class RouteInput(BaseModel):
     fixed_id:int|None=None
     sender_filter:int|None=None
 class Switch(BaseModel): enabled:bool
+class PaceSetting(BaseModel): mode:str
 class RouteEdit(BaseModel):
     mode:str
     fixed_id:int|None=None
@@ -175,6 +176,23 @@ async def delete_account(account_id:int):
         db.delete(account)
         db.commit()
     return {"ok":True,"removed_routes":len(affected_ids)}
+
+@app.get("/api/settings/delivery",dependencies=[Depends(authorized)])
+async def get_delivery_settings():
+    with SessionLocal() as db:
+        row=db.get(SyncSetting,"delivery_pace")
+        return {"mode":row.value if row else "normal"}
+
+@app.put("/api/settings/delivery",dependencies=[Depends(authorized)])
+async def set_delivery_settings(data:PaceSetting):
+    if data.mode not in ("off","fast","normal","relaxed"):
+        raise HTTPException(400,"전달 간격을 선택하세요")
+    with SessionLocal() as db:
+        row=db.get(SyncSetting,"delivery_pace")
+        if row: row.value=data.mode
+        else: db.add(SyncSetting(key="delivery_pace",value=data.mode))
+        db.commit()
+    return {"ok":True,"mode":data.mode}
 
 @app.get("/api/routes",dependencies=[Depends(authorized)])
 async def routes():
