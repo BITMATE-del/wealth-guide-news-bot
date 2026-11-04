@@ -1,11 +1,12 @@
 import os, re, secrets
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import select, desc, delete, or_
-from .models import SessionLocal, Account, Route, Delivery
+from .models import SessionLocal, Account, Route, Delivery, ChatName
 from .core import SyncEngine
 
 engine=None
@@ -52,6 +53,12 @@ class RouteInput(BaseModel):
     fixed_id:int|None=None
     sender_filter:int|None=None
 class Switch(BaseModel): enabled:bool
+class RouteEdit(BaseModel):
+    mode:str
+    fixed_id:int|None=None
+class BulkSwitch(BaseModel):
+    route_ids:list[int]=Field(min_length=1,max_length=500)
+    enabled:bool
 
 @app.get("/")
 async def index(): return FileResponse("static/index.html")
@@ -118,8 +125,24 @@ async def phone_finish(data:Verify):
 
 @app.get("/api/accounts/{account_id}/chats",dependencies=[Depends(authorized)])
 async def chats(account_id:int):
-    try: return await engine.chats(account_id)
+    try:
+        items=await engine.chats(account_id)
+        with SessionLocal() as db:
+            for item in items:
+                obj=db.get(ChatName,item["id"])
+                if obj:
+                    obj.name=item["name"][:300]
+                    obj.updated_at=datetime.now(timezone.utc)
+                else:
+                    db.add(ChatName(chat_id=item["id"],name=item["name"][:300]))
+            db.commit()
+        return items
     except ValueError as e: raise HTTPException(400,str(e))
+
+@app.get("/api/chat-names",dependencies=[Depends(authorized)])
+async def chat_names():
+    with SessionLocal() as db:
+        return {str(row.chat_id):row.name for row in db.scalars(select(ChatName))}
 
 @app.patch("/api/accounts/{account_id}",dependencies=[Depends(authorized)])
 async def switch_account(account_id:int,data:Switch):
@@ -186,6 +209,45 @@ async def switch_route(route_id:int,data:Switch):
         obj=db.get(Route,route_id)
         if not obj: raise HTTPException(404,"규칙이 없습니다")
         obj.active=data.enabled
+        db.commit()
+    return {"ok":True}
+
+@app.put("/api/routes/{route_id}",dependencies=[Depends(authorized)])
+async def edit_route(route_id:int,data:RouteEdit):
+    if data.mode not in ("same","fixed"):
+        raise HTTPException(400,"전송 방식을 선택하세요")
+    with SessionLocal() as db:
+        route=db.get(Route,route_id)
+        if not route: raise HTTPException(404,"전달 설정이 없습니다")
+        if data.mode=="fixed":
+            sender=db.get(Account,data.fixed_id) if data.fixed_id else None
+            if not sender or not sender.enabled:
+                raise HTTPException(400,"사용 가능한 발신 계정을 선택하세요")
+            route.fixed_id=sender.id
+        else:
+            route.fixed_id=None
+        route.mode=data.mode
+        db.commit()
+    return {"ok":True}
+
+@app.post("/api/routes/bulk",dependencies=[Depends(authorized)])
+async def bulk_routes(data:BulkSwitch):
+    with SessionLocal() as db:
+        matches=list(db.scalars(select(Route).where(Route.id.in_(data.route_ids))))
+        if len(matches)!=len(set(data.route_ids)):
+            raise HTTPException(404,"일부 전달 설정이 존재하지 않습니다")
+        for route in matches:
+            route.active=data.enabled
+        db.commit()
+    return {"ok":True,"count":len(matches)}
+
+@app.delete("/api/routes/{route_id}",dependencies=[Depends(authorized)])
+async def delete_route(route_id:int):
+    with SessionLocal() as db:
+        route=db.get(Route,route_id)
+        if not route: raise HTTPException(404,"이미 삭제되었거나 존재하지 않는 전달 설정입니다")
+        db.execute(delete(Delivery).where(Delivery.route_id==route_id))
+        db.delete(route)
         db.commit()
     return {"ok":True}
 
