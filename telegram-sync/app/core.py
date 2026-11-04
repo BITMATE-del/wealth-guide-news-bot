@@ -21,6 +21,7 @@ class SyncEngine:
         self.pending = {}
         self.locks = {}
         self.next_send_at = {}
+        self.member_count_cache = {}
     def encrypt(self, s): return self.cipher.encrypt(s.encode()).decode()
     def decrypt(self, s): return self.cipher.decrypt(s.encode()).decode()
     def make_client(self, session=""):
@@ -156,9 +157,40 @@ class SyncEngine:
         c = self.clients.get(account_id)
         if not c: raise ValueError("계정이 연결되지 않았습니다")
         result=[]
+        pending=[]
+        now=asyncio.get_running_loop().time()
         async for d in c.iter_dialogs(limit=300):
-            if d.is_group or d.is_channel:
-                result.append({"id":d.id,"name":d.name})
+            if not (d.is_group or d.is_channel): continue
+            # Some Telegram dialog entities already contain member counts.
+            value=getattr(d.entity,"participants_count",None)
+            if not isinstance(value,int) or value<0: value=None
+            cached=self.member_count_cache.get((account_id,d.id))
+            if value is None and cached and now-cached[0]<600:
+                value=cached[1]
+            item={"id":d.id,"name":d.name,"member_count":value}
+            result.append(item)
+            if value is not None:
+                self.member_count_cache[(account_id,d.id)]=(now,value)
+            elif not cached or now-cached[0]>=600:
+                pending.append((item,d.entity))
+
+        # Telegram does not put member counts in every dialog. Fetch missing
+        # counts with a bounded number of small requests so listing 300 chats
+        # cannot trigger hundreds of API calls or stall the management screen.
+        semaphore=asyncio.Semaphore(3)
+        async def enrich(item,entity):
+            async with semaphore:
+                try:
+                    count=await asyncio.wait_for(c.get_participants(entity,limit=0),timeout=5)
+                    total=getattr(count,"total",None)
+                    if isinstance(total,int) and total>=0:
+                        item["member_count"]=total
+                        self.member_count_cache[(account_id,item["id"])]=(asyncio.get_running_loop().time(),total)
+                except Exception:
+                    # An inaccessible/private group must not break the list.
+                    self.member_count_cache[(account_id,item["id"])]=(asyncio.get_running_loop().time(),None)
+        if pending:
+            await asyncio.gather(*(enrich(item,entity) for item,entity in pending[:45]))
         return result
     def delivery_wait_seconds(self, message, license_id=None):
         # A deterministic, adjustable reading/typing-time approximation.
