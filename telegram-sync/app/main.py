@@ -82,6 +82,14 @@ class BulkSwitch(BaseModel):
 @app.get("/")
 async def index(): return FileResponse("static/index.html")
 
+@app.get("/app")
+async def customer_page():
+    return FileResponse("static/index.html")
+
+@app.get("/admin")
+async def owner_page():
+    return FileResponse("static/index.html")
+
 @app.get("/health")
 async def health(): return {"ok":True,"service":"telegram-sync"}
 
