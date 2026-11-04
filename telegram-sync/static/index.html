@@ -349,15 +349,33 @@
 </head>
 <body>
   <section class="login-shell" id="login">
-    <div class="login-card">
+    <div class="login-card" style="max-width:510px">
       <div class="brand-chip"><span class="brand-mark">T</span> 텔레그램 그룹 동기화</div>
-      <h2 class="login-title">관리자 로그인</h2>
-      <p class="login-sub">등록된 관리자만 접속할 수 있습니다. 로그인 후 계정 등록, 전달 그룹 설정, 전송 기록 확인을 한곳에서 관리하세요.</p>
-      <div class="field">
-        <label class="label" for="adminPassword">관리자 비밀번호</label>
-        <input id="adminPassword" type="password" autocomplete="current-password" placeholder="관리자 비밀번호 입력">
+      <h2 class="login-title">서비스 로그인</h2>
+      <p class="login-sub">라이선스를 등록하고 본인 컴퓨터에서 이용하세요.</p>
+      <div class="auth-switch">
+        <button class="btn active" id="customerLoginTab" onclick="loginTab('customer')">이용자 로그인</button>
+        <button class="btn" id="activateTab" onclick="loginTab('activate')">라이선스 등록</button>
+        <button class="btn" id="ownerLoginTab" onclick="loginTab('owner')">발급 관리자</button>
       </div>
-      <button class="btn primary block" style="margin-top:18px" onclick="signin()">로그인</button>
+      <div id="customerLoginBox" class="stack">
+        <div class="field"><label class="label" for="loginLicenseCode">라이선스 키</label><input type="text" id="loginLicenseCode" autocomplete="off" placeholder="TGS-..."></div>
+        <div class="field"><label class="label" for="loginLicensePassword">2차 비밀번호</label><input type="password" id="loginLicensePassword" autocomplete="current-password" placeholder="등록할 때 설정한 비밀번호"></div>
+        <button class="btn primary block" onclick="customerSignin()">로그인</button>
+        <button class="btn block" onclick="requestDeviceReset()">기기 변경 초기화 요청</button>
+        <div class="help" id="customerLoginHint">처음 사용하는 경우 라이선스 등록을 먼저 진행하세요. 등록한 브라우저에서만 로그인할 수 있습니다.</div>
+      </div>
+      <div id="activateBox" class="stack hide">
+        <div class="field"><label class="label" for="activateCode">발급받은 라이선스 키</label><input type="text" id="activateCode" autocomplete="off" placeholder="TGS-..."></div>
+        <div class="field"><label class="label" for="activatePassword">새 2차 비밀번호</label><input type="password" id="activatePassword" autocomplete="new-password" placeholder="8자 이상"></div>
+        <div class="field"><label class="label" for="activatePasswordAgain">2차 비밀번호 확인</label><input type="password" id="activatePasswordAgain" autocomplete="new-password" placeholder="한 번 더 입력"></div>
+        <div class="note-box">라이선스를 등록하는 순간 이용 기간이 시작되고 현재 브라우저가 이용 기기로 지정됩니다. 다른 브라우저나 컴퓨터로 바꾸려면 관리자 승인이 필요합니다.</div>
+        <button class="btn primary block" onclick="customerActivate()">라이선스 등록 및 기기 지정</button>
+      </div>
+      <div id="ownerLoginBox" class="stack hide">
+        <div class="field"><label class="label" for="adminPassword">발급 관리자 비밀번호</label><input id="adminPassword" type="password" autocomplete="current-password" placeholder="관리자 비밀번호 입력"></div>
+        <button class="btn primary block" onclick="signin()">관리자 로그인</button>
+      </div>
     </div>
   </section>
 
@@ -379,6 +397,7 @@
         <button data-tab="accounts" onclick="tab('accounts')"><span class="menu-icon">계</span>계정 관리</button>
         <button data-tab="settings" onclick="tab('settings')"><span class="menu-icon">설</span>전달 설정</button>
         <button data-tab="history" onclick="tab('history')"><span class="menu-icon">기</span>전송 기록</button>
+        <button data-tab="licenses" id="licensesMenu" class="hide" onclick="tab('licenses');loadLicenses()"><span class="menu-icon">권</span>라이선스 관리</button>
       </nav>
 
       <div class="sidebar-foot">
@@ -564,6 +583,41 @@
             <div class="log-list" id="logList"></div>
           </div>
         </section>
+        <section id="licenses" class="section hide">
+          <div class="section-head">
+            <div><h2 class="section-title">라이선스 관리</h2>
+            <p class="section-sub">판매용 라이선스 발급, 이용 기간, 기기 초기화를 관리합니다.</p></div>
+          </div>
+          <div class="panel">
+            <h3 class="section-title" style="font-size:20px">새 라이선스 발급</h3>
+            <div class="form-grid" style="margin-top:16px">
+              <div class="field"><label class="label" for="issueLabel">고객명 / 메모</label><input id="issueLabel" type="text" placeholder="예: 고객 A"></div>
+              <div class="field"><label class="label" for="issueDays">이용 기간</label>
+                <select id="issueDays" onchange="changeIssueDays()">
+                  <option value="1">1일</option><option value="7">7일</option><option value="30" selected>30일</option>
+                  <option value="custom">사용자 지정</option>
+                </select>
+              </div>
+              <div class="field full hide" id="customDaysBox"><label class="label" for="customDays">사용자 지정 이용 일수 (1~3650일)</label><input type="number" min="1" max="3650" id="customDays" value="60"></div>
+            </div>
+            <button class="btn primary" style="margin-top:14px" onclick="issueNewLicense()">라이선스 발급하기</button>
+            <div class="note-box hide" id="issuedKeyPanel" style="margin-top:16px">
+              <strong>새 라이선스 키 — 지금 복사하세요.</strong>
+              <p id="issuedKeyText" style="font-size:17px;font-weight:800;word-break:break-all;margin:10px 0"></p>
+              <button class="btn" onclick="copyIssuedKey()">라이선스 키 복사</button>
+              <p class="help">보안을 위해 전체 라이선스 키는 발급 직후 한 번만 표시됩니다.</p>
+            </div>
+          </div>
+          <div class="panel">
+            <h3 class="section-title" style="font-size:20px">등록된 라이선스</h3>
+            <div id="licenseList" class="list" style="margin-top:16px"></div>
+          </div>
+          <div class="panel">
+            <h3 class="section-title" style="font-size:20px">기기 초기화 승인 대기</h3>
+            <div class="note-box" style="margin-top:12px;margin-bottom:16px">승인하면 기존 기기의 인증이 해제됩니다. 고객이 새 기기에서 라이선스 키와 2차 비밀번호로 로그인하면 그 기기가 자동 등록됩니다.</div>
+            <div id="resetRequestList" class="list"></div>
+          </div>
+        </section>
       </div>
     </main>
   </div>
@@ -571,7 +625,7 @@
   <div id="notice"></div>
 
   <script>
-    let csrf="", accounts=[], routes=[], token="", dialogs=[], chatNames={}, targetDialogs=[], routeEditorId=null;
+    let csrf="", accounts=[], routes=[], token="", dialogs=[], chatNames={}, targetDialogs=[], routeEditorId=null, isOwner=false, issuedKey="";
     const $ = (id) => document.getElementById(id);
 
     function safe(s){
@@ -605,7 +659,8 @@
       overview:"대시보드",
       accounts:"계정 관리",
       settings:"전달 설정",
-      history:"전송 기록"
+      history:"전송 기록",
+      licenses:"라이선스 관리"
     };
 
     function tab(target){
@@ -619,6 +674,109 @@
       $("sessionBox").classList.toggle("hide", type !== "session");
       $("phoneTab").classList.toggle("active", type === "phone");
       $("sessionTab").classList.toggle("active", type === "session");
+    }
+
+    function loginTab(target){
+      const kinds=["customer","activate","owner"];
+      kinds.forEach(kind=>{
+        const box=kind==="customer"?"customerLoginBox":kind==="activate"?"activateBox":"ownerLoginBox";
+        const button=kind==="customer"?"customerLoginTab":kind==="activate"?"activateTab":"ownerLoginTab";
+        $(box).classList.toggle("hide",kind!==target);
+        $(button).classList.toggle("active",kind===target);
+      });
+    }
+    async function customerSignin(){
+      await run(async()=>{
+        const data=await api("/license/login","POST",{
+          code:$("loginLicenseCode").value.trim(),
+          password:$("loginLicensePassword").value
+        });
+        csrf=data.csrf;
+        $("loginLicensePassword").value="";
+        await start();
+      });
+    }
+    async function customerActivate(){
+      await run(async()=>{
+        const password=$("activatePassword").value;
+        if(password.length<8)throw Error("2차 비밀번호는 8자 이상 입력하세요");
+        if(password!==$("activatePasswordAgain").value)throw Error("비밀번호 확인이 일치하지 않습니다");
+        const data=await api("/license/activate","POST",{
+          code:$("activateCode").value.trim(),password
+        });
+        csrf=data.csrf;
+        $("activatePassword").value="";
+        $("activatePasswordAgain").value="";
+        await start();
+      });
+    }
+    async function requestDeviceReset(){
+      await run(async()=>{
+        const code=$("loginLicenseCode").value.trim(),password=$("loginLicensePassword").value;
+        if(!code||!password)throw Error("라이선스 키와 2차 비밀번호를 입력하세요");
+        const result=await api("/license/reset-request","POST",{code,password});
+        $("customerLoginHint").textContent=result.message+" · 발급 관리자의 승인을 받은 뒤 새 기기에서 로그인하세요.";
+        notice("기기 초기화 요청이 접수됐습니다");
+      });
+    }
+    function changeIssueDays(){
+      $("customDaysBox").classList.toggle("hide",$("issueDays").value!=="custom");
+    }
+    async function issueNewLicense(){
+      await run(async()=>{
+        const selected=$("issueDays").value;
+        const days=Number(selected==="custom"?$("customDays").value:selected);
+        if(!Number.isInteger(days)||days<1||days>3650)throw Error("이용 기간은 1~3650일로 입력하세요");
+        const result=await api("/admin/licenses","POST",{label:$("issueLabel").value.trim(),days});
+        issuedKey=result.code;
+        $("issuedKeyText").textContent=issuedKey;
+        $("issuedKeyPanel").classList.remove("hide");
+        $("issueLabel").value="";
+        notice("라이선스를 발급했습니다");
+        await loadLicenses();
+      });
+    }
+    async function copyIssuedKey(){
+      if(!issuedKey)return;
+      try{await navigator.clipboard.writeText(issuedKey);notice("라이선스 키를 복사했습니다")}
+      catch(e){notice("클립보드 복사 권한을 확인해 주세요")}
+    }
+    function licenseStatus(license){
+      if(license.blocked)return "중지됨";
+      if(license.expired)return "만료됨";
+      if(license.activated)return "사용 중";
+      return "등록 대기";
+    }
+    async function loadLicenses(){
+      if(!isOwner)return;
+      await run(async()=>{
+        const [licenses,resets]=await Promise.all([api("/admin/licenses"),api("/admin/device-resets")]);
+        $("licenseList").innerHTML=licenses.length?licenses.map(l=>
+          '<div class="list-item"><div><div class="list-item-title">'+safe(l.label||"고객")+
+          ' <span class="badge">'+safe(licenseStatus(l))+'</span></div>'+
+          '<div class="list-item-sub">키: '+safe(l.prefix)+'… · '+l.duration_days+'일 · '+(l.expires_at?'만료: '+safe(new Date(l.expires_at).toLocaleString("ko-KR")):'등록 후 기간 시작')+'</div>'+
+          '<div class="list-item-sub">등록 기기: '+(l.device_bound?'지정됨':'미지정')+
+          (l.device_ip?' · 마지막 등록 IP '+safe(l.device_ip):'')+'</div></div>'+
+          '<button class="btn" onclick="toggleLicenseBlock('+l.id+','+(!l.blocked)+')">'+(l.blocked?'정지 해제':'사용 정지')+'</button></div>'
+        ).join(""):renderEmpty("발급한 라이선스가 없습니다.");
+        const byId=new Map(licenses.map(l=>[l.id,l]));
+        $("resetRequestList").innerHTML=resets.length?resets.map(r=>{
+          const l=byId.get(r.license_id);
+          return '<div class="list-item"><div><div class="list-item-title">'+safe(l?.label||"고객")+'</div>'+
+            '<div class="list-item-sub">'+safe(l?.prefix||"")+"… · 요청: "+safe(new Date(r.requested_at).toLocaleString("ko-KR"))+
+            ' · IP '+safe(r.ip||"알 수 없음")+'</div></div>'+
+            '<div class="group-actions"><button class="btn primary" onclick="reviewReset('+r.id+',true)">승인</button>'+
+            '<button class="btn" onclick="reviewReset('+r.id+',false)">거절</button></div></div>';
+        }).join(""):renderEmpty("초기화 승인 대기 요청이 없습니다.");
+      });
+    }
+    async function reviewReset(id,approved){
+      if(!confirm(approved?"기기 등록을 초기화하시겠습니까? 기존 기기에서 로그인이 해제됩니다.":"초기화 요청을 거절하시겠습니까?"))return;
+      await run(async()=>{await api("/admin/device-resets/"+id,"POST",{approved});notice(approved?"기기 초기화를 승인했습니다":"요청을 거절했습니다");await loadLicenses()});
+    }
+    async function toggleLicenseBlock(id,blocked){
+      if(!confirm(blocked?"이 라이선스의 사용을 중지할까요?":"이 라이선스의 정지를 해제할까요?"))return;
+      await run(async()=>{await api("/admin/licenses/"+id,"PATCH",{blocked});notice("상태를 변경했습니다");await loadLicenses()});
     }
 
     async function signin(){
@@ -638,11 +796,15 @@
     }
 
     async function start(){
-      const me = await api("/me");
-      if(!me.logged_in) return;
-      csrf = me.csrf;
+      const me=await api("/me");
+      if(!me.logged_in)return;
+      csrf=me.csrf;isOwner=!!me.is_owner;
       $("login").classList.add("hide");
       $("workspace").classList.remove("hide");
+      $("licensesMenu").classList.toggle("hide",!isOwner);
+      if(!isOwner&&me.license?.expires_at){
+        $("pageLabel").textContent="라이선스 만료: "+new Date(me.license.expires_at).toLocaleDateString("ko-KR");
+      }
       await refresh();
     }
 
