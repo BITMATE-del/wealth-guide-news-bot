@@ -906,6 +906,20 @@
     }
 
     function groupName(id){return chatNames[String(id)]||("그룹 "+id)}
+    function memberCountLabel(d){
+      return Number.isInteger(d.member_count)&&d.member_count>=0
+        ? d.member_count.toLocaleString("ko-KR")+"명"
+        : "인원 확인 불가";
+    }
+    function shortChatId(id){return "ID "+String(id).slice(-6)}
+    function dialogName(d){
+      return d.name+" · "+memberCountLabel(d)+" · "+shortChatId(d.id);
+    }
+    function chatDisplay(id){
+      const found=targetDialogs.find(d=>String(d.id)===String(id))
+        ||dialogs.find(d=>String(d.id)===String(id));
+      return safe(groupName(id))+(found?' <span class="target-meta">· '+safe(memberCountLabel(found))+'</span>':'');
+    }
     function renderCurrentRoutes(){
       const filter=($("routeSearch")?.value||"").trim().toLocaleLowerCase();
       const grouped=new Map();
@@ -922,12 +936,12 @@
         const allIds=group.items.map(r=>r.id);
         const activeCount=group.items.filter(r=>r.active).length;
         return '<div class="group-card">'+
-          '<div class="group-heading"><div><h4>'+safe(groupName(group.source))+'</h4>'+
+          '<div class="group-heading"><div><h4>'+chatDisplay(group.source)+'</h4>'+
           '<p class="help">감지 계정: '+accountName(group.watcher)+' · 연결 '+group.items.length+'개 · 작동 중 '+activeCount+'개</p></div>'+
           '<div class="group-actions"><button class="btn" onclick="bulkToggle('+JSON.stringify(allIds)+',true)">전체 시작</button>'+
           '<button class="btn" onclick="bulkToggle('+JSON.stringify(allIds)+',false)">전체 중지</button></div></div>'+
           '<div class="group-rows">'+visible.map(r=>
-            '<div class="route-row"><div class="route-details"><strong>'+safe(groupName(r.target_chat))+'</strong>'+
+            '<div class="route-row"><div class="route-details"><strong>'+chatDisplay(r.target_chat)+'</strong>'+
               '<p class="help">발신: '+(r.mode==="same"?"원본 작성자 계정":accountName(r.fixed_id))+' · ID '+r.target_chat+'</p></div>'+
               '<div class="route-actions"><span class="status '+(r.active?"ok":"warn")+'">'+(r.active?"작동 중":"중지됨")+'</span>'+
               '<button class="btn" onclick="toggleRouteEditor('+r.id+')">편집</button>'+
@@ -1120,19 +1134,21 @@
         const chosenSource=$("source").value;
         const watcherDialogs=await api("/accounts/"+id+"/chats");
         dialogs=watcherDialogs;
-        $("source").innerHTML=watcherDialogs.map(d=>'<option value="'+d.id+'">'+safe(d.name)+'</option>').join("");
+        $("source").innerHTML=watcherDialogs.map(d=>'<option value="'+d.id+'">'+safe(dialogName(d))+'</option>').join("");
         if(watcherDialogs.some(d=>String(d.id)===chosenSource))$("source").value=chosenSource;
         const connected=accounts.filter(a=>a.connected);
         const discovered=new Map(watcherDialogs.map(d=>[String(d.id),d]));
         const results=await Promise.allSettled(connected.filter(a=>String(a.id)!==id).map(a=>api("/accounts/"+a.id+"/chats")));
         for(const result of results)if(result.status==="fulfilled")
           for(const group of result.value)if(!discovered.has(String(group.id)))discovered.set(String(group.id),group);
+          else if(discovered.get(String(group.id)).member_count==null && group.member_count!=null)
+            discovered.set(String(group.id),group);
         targetDialogs=[...discovered.values()].sort((a,b)=>a.name.localeCompare(b.name,'ko')||String(a.id).localeCompare(String(b.id)));
         const choices=connected.map(a=>'<option value="'+a.id+'">'+safe(a.label)+'</option>').join("");
         $("targets").innerHTML=targetDialogs.map(d=>
-          '<div class="target-item" data-search="'+safe(d.name.toLocaleLowerCase())+'">'+
+          '<div class="target-item" data-search="'+safe(dialogName(d).toLocaleLowerCase())+'">'+
           '<label class="target-check"><input type="checkbox" class="targetCheck" onchange="filterTargets()" value="'+d.id+'">'+
-          '<span class="target-name">'+safe(d.name)+'<span class="target-meta"></span></span></label>'+
+          '<span class="target-name">'+safe(d.name)+' <span style="color:var(--sub);font-weight:500">· '+safe(memberCountLabel(d))+' · '+safe(shortChatId(d.id))+'</span><span class="target-meta"></span></span></label>'+
           '<div class="target-controls"><select class="targetMode" onchange="toggleTargetSender(this)">'+
           '<option value="same">원본 작성자 계정</option><option value="fixed">지정 계정</option></select>'+
           '<select class="targetSender hide">'+choices+'</select></div></div>'
