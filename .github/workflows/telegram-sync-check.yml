@@ -18,6 +18,10 @@ jobs:
           python-version: '3.12'
       - name: Python compile
         run: python -m compileall -q telegram-sync/app
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r telegram-sync/requirements.txt httpx
+      - name: License security regression tests
+        run: python -m unittest discover -s telegram-sync/tests -v
       - name: JavaScript syntax
         run: |
           python - <<'PY'
