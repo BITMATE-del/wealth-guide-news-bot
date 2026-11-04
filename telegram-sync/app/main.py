@@ -245,15 +245,34 @@ async def review_device_reset(reset_id:int,data:ReviewReset,request:Request):
         db.commit()
     return {"ok":True}
 
+def scoped_account(db, account_id, license_id):
+    row=db.get(Account,account_id)
+    if not row or (license_id is not None and row.license_id!=license_id):
+        raise HTTPException(404,"계정이 없습니다")
+    return row
+
+def scoped_route(db, route_id, license_id):
+    row=db.get(Route,route_id)
+    if not row: raise HTTPException(404,"전달 설정이 없습니다")
+    if license_id is not None:
+        watcher=db.get(Account,row.watcher_id)
+        if not watcher or watcher.license_id!=license_id:
+            raise HTTPException(404,"전달 설정이 없습니다")
+    return row
+
 @app.get("/api/accounts",dependencies=[Depends(authorized)])
-async def accounts():
+async def accounts(request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        rows=db.scalars(select(Account).order_by(Account.id)).all()
+        query=select(Account).order_by(Account.id)
+        if license_id is not None: query=query.where(Account.license_id==license_id)
+        rows=db.scalars(query).all()
         return [{"id":a.id,"label":a.label,"username":a.username,"telegram_id":a.tg_id,
                  "enabled":a.enabled,"connected":a.id in engine.clients} for a in rows]
 
 @app.post("/api/accounts/session/file",dependencies=[Depends(authorized)])
 async def add_session_file(
+    request:Request,
     file: UploadFile = File(...),
     label: str = Form("")
 ):
@@ -263,7 +282,7 @@ async def add_session_file(
         raise HTTPException(400,"Telethon .session 파일을 선택하세요")
     try:
         contents = await file.read(2 * 1024 * 1024 + 1)
-        return await engine.import_session_file(file.filename,contents,label.strip())
+        return await engine.import_session_file(file.filename,contents,label.strip(),get_identity(request))
     except ValueError as exc:
         raise HTTPException(400,str(exc))
     except Exception:
@@ -272,20 +291,23 @@ async def add_session_file(
         await file.close()
 
 @app.post("/api/accounts/phone/start",dependencies=[Depends(authorized)])
-async def phone_start(data:Phone):
+async def phone_start(data:Phone,request:Request):
     if not re.fullmatch(r"\+[1-9]\d{7,14}",data.phone):
         raise HTTPException(400,"국가번호를 포함해 입력하세요. 예: +8210...")
-    try: return await engine.phone_start(data.phone)
+    try: return await engine.phone_start(data.phone,get_identity(request))
     except Exception: raise HTTPException(400,"인증코드 요청에 실패했습니다. 잠시 후 다시 시도하세요")
 
 @app.post("/api/accounts/phone/finish",dependencies=[Depends(authorized)])
-async def phone_finish(data:Verify):
-    try: return await engine.phone_finish(data.token,data.code,data.password,data.label)
+async def phone_finish(data:Verify,request:Request):
+    try: return await engine.phone_finish(data.token,data.code,data.password,data.label,get_identity(request))
     except ValueError as e: raise HTTPException(400,str(e))
     except Exception: raise HTTPException(400,"인증에 실패했습니다. 코드를 다시 확인하세요")
 
 @app.get("/api/accounts/{account_id}/chats",dependencies=[Depends(authorized)])
-async def chats(account_id:int):
+async def chats(account_id:int,request:Request):
+    license_id=get_identity(request)
+    with SessionLocal() as db:
+        scoped_account(db,account_id,license_id)
     try:
         items=await engine.chats(account_id)
         with SessionLocal() as db:
@@ -301,15 +323,24 @@ async def chats(account_id:int):
     except ValueError as e: raise HTTPException(400,str(e))
 
 @app.get("/api/chat-names",dependencies=[Depends(authorized)])
-async def chat_names():
+async def chat_names(request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        return {str(row.chat_id):row.name for row in db.scalars(select(ChatName))}
+        if license_id is None:
+            rows=db.scalars(select(ChatName)).all()
+        else:
+            ids=set()
+            for route in db.scalars(select(Route).join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)):
+                ids.add(route.source_chat)
+                ids.add(route.target_chat)
+            rows=list(db.scalars(select(ChatName).where(ChatName.chat_id.in_(ids)))) if ids else []
+        return {str(row.chat_id):row.name for row in rows}
 
 @app.patch("/api/accounts/{account_id}",dependencies=[Depends(authorized)])
-async def switch_account(account_id:int,data:Switch):
+async def switch_account(account_id:int,data:Switch,request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        obj=db.get(Account,account_id)
-        if not obj: raise HTTPException(404,"계정이 없습니다")
+        obj=scoped_account(db,account_id,license_id)
         obj.enabled=data.enabled
         db.commit()
         if data.enabled: await engine.attach(obj)
@@ -319,12 +350,12 @@ async def switch_account(account_id:int,data:Switch):
     return {"ok":True}
 
 @app.delete("/api/accounts/{account_id}",dependencies=[Depends(authorized)])
-async def delete_account(account_id:int):
+async def delete_account(account_id:int,request:Request):
+    license_id=get_identity(request)
     # Disconnect first so this account cannot initiate new deliveries.
     # Related routes and delivery records are removed together, with no orphan FKs.
     with SessionLocal() as db:
-        account=db.get(Account,account_id)
-        if not account: raise HTTPException(404,"이미 삭제되었거나 존재하지 않는 계정입니다")
+        account=scoped_account(db,account_id,license_id)
         connected=engine.clients.pop(account_id,None)
         if connected: await connected.disconnect()
         affected_ids=list(db.scalars(select(Route.id).where(
@@ -355,21 +386,26 @@ async def set_delivery_settings(data:PaceSetting):
     return {"ok":True,"mode":data.mode}
 
 @app.get("/api/routes",dependencies=[Depends(authorized)])
-async def routes():
+async def routes(request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        rows=db.scalars(select(Route).order_by(desc(Route.id))).all()
+        query=select(Route).order_by(desc(Route.id))
+        if license_id is not None:
+            query=query.join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)
+        rows=db.scalars(query).all()
         return [{"id":r.id,"watcher_id":r.watcher_id,"source_chat":r.source_chat,"target_chat":r.target_chat,
                  "sender_filter":r.sender_filter,"mode":r.mode,"fixed_id":r.fixed_id,"active":r.active} for r in rows]
 
 @app.post("/api/routes",dependencies=[Depends(authorized)])
-async def create_route(data:RouteInput):
+async def create_route(data:RouteInput,request:Request):
+    license_id=get_identity(request)
     if data.mode not in ("same","fixed"): raise HTTPException(400,"전송 방식을 선택하세요")
     if data.source_chat==data.target_chat: raise HTTPException(400,"원본방과 대상방은 같을 수 없습니다")
     with SessionLocal() as db:
-        watcher=db.get(Account,data.watcher_id)
-        if not watcher or not watcher.enabled: raise HTTPException(400,"감지 계정을 선택하세요")
+        watcher=scoped_account(db,data.watcher_id,license_id)
+        if not watcher.enabled: raise HTTPException(400,"감지 계정을 선택하세요")
         if data.mode=="fixed":
-            sender=db.get(Account,data.fixed_id) if data.fixed_id else None
+            sender=scoped_account(db,data.fixed_id,license_id) if data.fixed_id else None
             if not sender or not sender.enabled: raise HTTPException(400,"전송 계정을 선택하세요")
         route=Route(**data.model_dump())
         db.add(route)
@@ -382,23 +418,23 @@ async def create_route(data:RouteInput):
         return {"id":route.id}
 
 @app.patch("/api/routes/{route_id}",dependencies=[Depends(authorized)])
-async def switch_route(route_id:int,data:Switch):
+async def switch_route(route_id:int,data:Switch,request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        obj=db.get(Route,route_id)
-        if not obj: raise HTTPException(404,"규칙이 없습니다")
+        obj=scoped_route(db,route_id,license_id)
         obj.active=data.enabled
         db.commit()
     return {"ok":True}
 
 @app.put("/api/routes/{route_id}",dependencies=[Depends(authorized)])
-async def edit_route(route_id:int,data:RouteEdit):
+async def edit_route(route_id:int,data:RouteEdit,request:Request):
+    license_id=get_identity(request)
     if data.mode not in ("same","fixed"):
         raise HTTPException(400,"전송 방식을 선택하세요")
     with SessionLocal() as db:
-        route=db.get(Route,route_id)
-        if not route: raise HTTPException(404,"전달 설정이 없습니다")
+        route=scoped_route(db,route_id,license_id)
         if data.mode=="fixed":
-            sender=db.get(Account,data.fixed_id) if data.fixed_id else None
+            sender=scoped_account(db,data.fixed_id,license_id) if data.fixed_id else None
             if not sender or not sender.enabled:
                 raise HTTPException(400,"사용 가능한 발신 계정을 선택하세요")
             route.fixed_id=sender.id
@@ -409,29 +445,35 @@ async def edit_route(route_id:int,data:RouteEdit):
     return {"ok":True}
 
 @app.post("/api/routes/bulk",dependencies=[Depends(authorized)])
-async def bulk_routes(data:BulkSwitch):
+async def bulk_routes(data:BulkSwitch,request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
         matches=list(db.scalars(select(Route).where(Route.id.in_(data.route_ids))))
         if len(matches)!=len(set(data.route_ids)):
             raise HTTPException(404,"일부 전달 설정이 존재하지 않습니다")
         for route in matches:
+            scoped_route(db,route.id,license_id)
             route.active=data.enabled
         db.commit()
     return {"ok":True,"count":len(matches)}
 
 @app.delete("/api/routes/{route_id}",dependencies=[Depends(authorized)])
-async def delete_route(route_id:int):
+async def delete_route(route_id:int,request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        route=db.get(Route,route_id)
-        if not route: raise HTTPException(404,"이미 삭제되었거나 존재하지 않는 전달 설정입니다")
+        route=scoped_route(db,route_id,license_id)
         db.execute(delete(Delivery).where(Delivery.route_id==route_id))
         db.delete(route)
         db.commit()
     return {"ok":True}
 
 @app.get("/api/logs",dependencies=[Depends(authorized)])
-async def logs():
+async def logs(request:Request):
+    license_id=get_identity(request)
     with SessionLocal() as db:
-        rows=db.scalars(select(Delivery).order_by(desc(Delivery.id)).limit(100)).all()
+        query=select(Delivery).order_by(desc(Delivery.id)).limit(100)
+        if license_id is not None:
+            query=query.join(Route,Delivery.route_id==Route.id).join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)
+        rows=db.scalars(query).all()
         return [{"id":d.id,"route_id":d.route_id,"status":d.status,"error":d.error,
                  "created_at":d.created_at.isoformat()} for d in rows]
