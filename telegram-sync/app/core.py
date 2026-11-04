@@ -7,7 +7,7 @@ from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from .models import SessionLocal, Account, Route, Delivery
+from .models import SessionLocal, Account, Route, Delivery, SyncSetting
 
 log = logging.getLogger("group_sync")
 
@@ -19,6 +19,7 @@ class SyncEngine:
         self.clients = {}
         self.pending = {}
         self.locks = {}
+        self.next_send_at = {}
     def encrypt(self, s): return self.cipher.encrypt(s.encode()).decode()
     def decrypt(self, s): return self.cipher.decrypt(s.encode()).decode()
     def make_client(self, session=""):
@@ -150,6 +151,39 @@ class SyncEngine:
             if d.is_group or d.is_channel:
                 result.append({"id":d.id,"name":d.name})
         return result
+    def delivery_wait_seconds(self, message):
+        # A deterministic, adjustable reading/typing-time approximation.
+        # It is not a claim about a real person's typing speed and does not
+        # bypass or replace Telegram's rate limits.
+        with SessionLocal() as db:
+            setting=db.get(SyncSetting,"delivery_pace")
+            mode=setting.value if setting else "normal"
+        text=(message.raw_text or "").strip()
+        chars=len(text)
+        if mode=="off": return 0.0
+        # Seconds: base time + length / estimated characters per second.
+        # Large posts are capped so delivery queues remain manageable.
+        if mode=="relaxed": return float(min(45,max(10,5 + chars / 4)))
+        if mode=="fast": return float(min(12,max(3,1.5 + chars / 12)))
+        return float(min(25,max(6,3 + chars / 7)))
+
+    async def pace_sender(self, sender_id, message):
+        # Queue all sends from one Telegram account, including simultaneous
+        # source messages, to avoid an immediate burst to multiple groups.
+        lock=self.locks.setdefault(sender_id,asyncio.Lock())
+        await lock.acquire()
+        try:
+            loop=asyncio.get_running_loop()
+            now=loop.time()
+            wait=max(0.0,self.next_send_at.get(sender_id,now)-now)
+            if wait: await asyncio.sleep(wait)
+            # Reserve the next interval once the next send actually starts.
+            self.next_send_at[sender_id]=loop.time()+self.delivery_wait_seconds(message)
+            return lock
+        except BaseException:
+            lock.release()
+            raise
+
     async def on_message(self, watcher_id, event):
         if not event.chat_id or not event.sender_id: return
         # A message already delivered by this service must not trigger another forwarding route.
@@ -183,43 +217,47 @@ class SyncEngine:
             try:
                 c = self.clients.get(sender_id)
                 if not c: raise ValueError("전송 계정이 연결되어 있지 않습니다")
-                entity = await c.get_input_entity(route.target_chat)
-                if event.message.media:
-                    raw=await event.message.download_media(file=bytes)
-                    if not raw: raise ValueError("지원하지 않는 첨부 형식입니다")
-                    if len(raw)>20*1024*1024: raise ValueError("첨부파일 용량 제한 초과 (20MB)")
-                    media = event.message.media
-                    file_info = event.message.file
-                    original_name = getattr(file_info, "name", None) if file_info else None
-                    mime_type = getattr(file_info, "mime_type", None) if file_info else None
-                    # Telegram needs a meaningful extension to display uploaded bytes
-                    # as an in-chat photo/video rather than an unnamed document.
-                    if isinstance(media, MessageMediaPhoto):
-                        filename = "photo.jpg"
-                        mime_type = "image/jpeg"
-                        send_as_document = False
-                    elif isinstance(media, MessageMediaDocument):
-                        extension = mimetypes.guess_extension(mime_type or "") or ""
-                        if mime_type == "image/jpeg": extension = ".jpg"
-                        elif mime_type == "video/mp4": extension = ".mp4"
-                        filename = original_name or ("media" + extension if extension else "attachment.bin")
-                        send_as_document = not bool(mime_type and (mime_type.startswith("image/") or mime_type.startswith("video/")))
+                pace_lock=await self.pace_sender(sender_id,event.message)
+                try:
+                    entity = await c.get_input_entity(route.target_chat)
+                    if event.message.media:
+                        raw=await event.message.download_media(file=bytes)
+                        if not raw: raise ValueError("지원하지 않는 첨부 형식입니다")
+                        if len(raw)>20*1024*1024: raise ValueError("첨부파일 용량 제한 초과 (20MB)")
+                        media = event.message.media
+                        file_info = event.message.file
+                        original_name = getattr(file_info, "name", None) if file_info else None
+                        mime_type = getattr(file_info, "mime_type", None) if file_info else None
+                        # Telegram needs a meaningful extension to display uploaded bytes
+                        # as an in-chat photo/video rather than an unnamed document.
+                        if isinstance(media, MessageMediaPhoto):
+                            filename = "photo.jpg"
+                            mime_type = "image/jpeg"
+                            send_as_document = False
+                        elif isinstance(media, MessageMediaDocument):
+                            extension = mimetypes.guess_extension(mime_type or "") or ""
+                            if mime_type == "image/jpeg": extension = ".jpg"
+                            elif mime_type == "video/mp4": extension = ".mp4"
+                            filename = original_name or ("media" + extension if extension else "attachment.bin")
+                            send_as_document = not bool(mime_type and (mime_type.startswith("image/") or mime_type.startswith("video/")))
+                        else:
+                            raise ValueError("현재 자동 전달에서 지원하지 않는 미디어 형식입니다")
+                        buffer = io.BytesIO(raw)
+                        buffer.name = filename
+                        sent = await c.send_file(
+                            entity, buffer, caption=event.raw_text or "",
+                            force_document=send_as_document,
+                            supports_streaming=bool(mime_type and mime_type.startswith("video/")),
+                            formatting_entities=event.message.entities or None
+                        )
                     else:
-                        raise ValueError("현재 자동 전달에서 지원하지 않는 미디어 형식입니다")
-                    buffer = io.BytesIO(raw)
-                    buffer.name = filename
-                    sent = await c.send_file(
-                        entity, buffer, caption=event.raw_text or "",
-                        force_document=send_as_document,
-                        supports_streaming=bool(mime_type and mime_type.startswith("video/")),
-                        formatting_entities=event.message.entities or None
-                    )
-                else:
-                    if not event.raw_text: raise ValueError("전송할 내용이 없습니다")
-                    sent=await c.send_message(entity,event.raw_text,
-                          formatting_entities=event.message.entities,link_preview=False)
-                target_id=sent.id
-                status="sent"
+                        if not event.raw_text: raise ValueError("전송할 내용이 없습니다")
+                        sent=await c.send_message(entity,event.raw_text,
+                              formatting_entities=event.message.entities,link_preview=False)
+                    target_id=sent.id
+                    status="sent"
+                finally:
+                    pace_lock.release()
             except FloodWaitError as e:
                 error=f"텔레그램 전송 제한으로 {e.seconds}초 대기가 필요합니다"
             except Exception as e:
