@@ -190,7 +190,14 @@ class SyncEngine:
                     # An inaccessible/private group must not break the list.
                     self.member_count_cache[(account_id,item["id"])]=(asyncio.get_running_loop().time(),None)
         if pending:
-            await asyncio.gather(*(enrich(item,entity) for item,entity in pending[:45]))
+            # Never delay the settings screen indefinitely on slow Telegram APIs.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(enrich(item,entity) for item,entity in pending[:45])),
+                    timeout=12,
+                )
+            except asyncio.TimeoutError:
+                pass
         return result
     def delivery_wait_seconds(self, message, license_id=None):
         # A deterministic, adjustable reading/typing-time approximation.
