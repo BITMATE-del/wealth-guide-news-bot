@@ -280,6 +280,10 @@
     .target-check input{width:18px;height:18px}
     .target-name{font-weight:800}
     .target-controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .code-request-status{border:1px solid #d9e3ff;background:#f2f5ff;color:#3656b3;padding:14px 16px;border-radius:14px;font-size:14px;line-height:1.6;font-weight:600}
+    .code-request-status.sending{border-color:#dbe5f4;background:#f8faff;color:#62748f}
+    .code-request-status.success{border-color:#c9ecd7;background:#f0faf4;color:#21804b}
+    .code-request-status.error{border-color:#f3d4d4;background:#fff5f5;color:#b43e44}
     .note-box{
       border:1px solid #d6def2;
       background:#f7f9fe;
@@ -426,7 +430,8 @@
                   <input id="phone" type="text" placeholder="예: +821012345678">
                 </div>
               </div>
-              <button class="btn primary block" onclick="sendCode()">인증코드 받기</button>
+              <button class="btn primary block" id="sendCodeButton" onclick="sendCode()">인증코드 받기</button>
+              <div id="codeRequestStatus" class="code-request-status hide" role="status" aria-live="polite"></div>
               <div id="verifyBox" class="form-grid hide">
                 <div class="field">
                   <label class="label" for="code">인증코드</label>
@@ -680,13 +685,35 @@
       });
     }
 
+    function showCodeRequestStatus(kind, message){
+      const el=$("codeRequestStatus");
+      el.className="code-request-status "+kind;
+      el.textContent=message;
+    }
+
     async function sendCode(){
-      await run(async()=>{
-        const value = await api("/accounts/phone/start","POST",{phone:$("phone").value.trim()});
-        token = value.token;
+      const button=$("sendCodeButton");
+      if(button.disabled)return;
+      const phone=$("phone").value.trim();
+      if(!/^\\+[1-9]\\d{7,14}$/.test(phone)){
+        showCodeRequestStatus("error","국가번호를 포함한 전화번호를 확인해 주세요. 예: +821012345678");
+        return;
+      }
+      button.disabled=true;
+      button.textContent="인증코드 요청 중…";
+      showCodeRequestStatus("sending","텔레그램에 인증코드를 요청하고 있습니다. 요청 완료 여부를 확인하는 중입니다.");
+      try{
+        const value=await api("/accounts/phone/start","POST",{phone});
+        token=value.token;
         $("verifyBox").classList.remove("hide");
-        notice("텔레그램 앱으로 받은 코드를 입력하세요");
-      });
+        showCodeRequestStatus("success","인증코드 요청이 접수되었습니다. 텔레그램 앱에서 인증코드를 확인해 아래에 입력해 주세요. 실제 도착 여부는 텔레그램에서 확인할 수 있습니다.");
+        button.textContent="인증코드 다시 요청";
+      }catch(e){
+        showCodeRequestStatus("error","인증코드 요청 실패: "+e.message);
+        button.textContent="인증코드 다시 요청";
+      }finally{
+        button.disabled=false;
+      }
     }
 
     async function verify(){
