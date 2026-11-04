@@ -1,7 +1,8 @@
-import os, asyncio, io, logging, secrets
+import os, asyncio, io, logging, secrets, sqlite3, tempfile
+from pathlib import Path
 from cryptography.fernet import Fernet
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
+from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -72,6 +73,36 @@ class SyncEngine:
             if not await c.is_user_authorized(): raise ValueError("올바른 세션이 아닙니다")
             return await self.save_account(c, label)
         finally: await c.disconnect()
+    async def import_session_file(self, filename, contents, label):
+        # A Telethon .session is a SQLite database containing Telegram credentials.
+        # Validate it before opening it with Telethon; never keep the raw file.
+        if not filename.lower().endswith(".session"):
+            raise ValueError("Telethon .session 파일만 업로드할 수 있습니다")
+        if not contents or len(contents) > 2 * 1024 * 1024:
+            raise ValueError("파일 크기는 2MB 이하여야 합니다")
+        if not contents.startswith(b"SQLite format 3\\x00"):
+            raise ValueError("Telethon 세션 파일 형식이 아닙니다")
+        with tempfile.TemporaryDirectory(prefix="tg-session-") as directory:
+            path = Path(directory) / "uploaded.session"
+            path.write_bytes(contents)
+            try:
+                with sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True) as db:
+                    db.execute("PRAGMA query_only=ON")
+                    row = db.execute("SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1").fetchone()
+                    if row is None or not isinstance(row[3], bytes) or len(row[3]) != 256:
+                        raise ValueError("인증 정보가 없는 세션 파일입니다")
+            except sqlite3.DatabaseError as exc:
+                raise ValueError("읽을 수 없는 세션 파일입니다") from exc
+            client = TelegramClient(SQLiteSession(str(path)), self.api_id, self.api_hash,
+                                    sequential_updates=True, flood_sleep_threshold=0)
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    raise ValueError("로그인이 만료되었거나 사용할 수 없는 세션입니다")
+                return await self.save_account(client, label)
+            finally:
+                await client.disconnect()
+
     async def phone_start(self, phone):
         if len(self.pending) >= 8: raise ValueError("인증 요청이 너무 많습니다")
         c = self.make_client()
