@@ -1,6 +1,6 @@
 import os, re, secrets
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
@@ -38,9 +38,6 @@ def authorized(request:Request):
         raise HTTPException(403,"보안 확인에 실패했습니다")
 
 class Login(BaseModel): password:str
-class ImportSession(BaseModel):
-    label:str=Field(min_length=1,max_length=100)
-    session:str=Field(min_length=30,max_length=4096)
 class Phone(BaseModel): phone:str
 class Verify(BaseModel):
     token:str
@@ -87,10 +84,24 @@ async def accounts():
         return [{"id":a.id,"label":a.label,"username":a.username,"telegram_id":a.tg_id,
                  "enabled":a.enabled,"connected":a.id in engine.clients} for a in rows]
 
-@app.post("/api/accounts/session",dependencies=[Depends(authorized)])
-async def add_session(data:ImportSession):
-    try: return await engine.import_session(data.session,data.label)
-    except Exception: raise HTTPException(400,"세션 연결에 실패했습니다. 계정과 세션 형식을 확인하세요")
+@app.post("/api/accounts/session/file",dependencies=[Depends(authorized)])
+async def add_session_file(
+    file: UploadFile = File(...),
+    label: str = Form("")
+):
+    if len(label) > 100:
+        raise HTTPException(400,"계정 이름은 100자 이내로 입력하세요")
+    if not file.filename or not file.filename.lower().endswith(".session"):
+        raise HTTPException(400,"Telethon .session 파일을 선택하세요")
+    try:
+        contents = await file.read(2 * 1024 * 1024 + 1)
+        return await engine.import_session_file(file.filename,contents,label.strip())
+    except ValueError as exc:
+        raise HTTPException(400,str(exc))
+    except Exception:
+        raise HTTPException(400,"세션 파일을 연결할 수 없습니다. 파일 형식과 로그인 상태를 확인하세요")
+    finally:
+        await file.close()
 
 @app.post("/api/accounts/phone/start",dependencies=[Depends(authorized)])
 async def phone_start(data:Phone):
