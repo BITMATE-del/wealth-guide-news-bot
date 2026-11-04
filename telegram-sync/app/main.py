@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, 
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete, or_
 from .models import SessionLocal, Account, Route, Delivery
 from .core import SyncEngine
 
@@ -133,6 +133,25 @@ async def switch_account(account_id:int,data:Switch):
             client=engine.clients.pop(account_id,None)
             if client: await client.disconnect()
     return {"ok":True}
+
+@app.delete("/api/accounts/{account_id}",dependencies=[Depends(authorized)])
+async def delete_account(account_id:int):
+    # Disconnect first so this account cannot initiate new deliveries.
+    # Related routes and delivery records are removed together, with no orphan FKs.
+    with SessionLocal() as db:
+        account=db.get(Account,account_id)
+        if not account: raise HTTPException(404,"이미 삭제되었거나 존재하지 않는 계정입니다")
+        connected=engine.clients.pop(account_id,None)
+        if connected: await connected.disconnect()
+        affected_ids=list(db.scalars(select(Route.id).where(
+            or_(Route.watcher_id==account_id,Route.fixed_id==account_id)
+        )))
+        if affected_ids:
+            db.execute(delete(Delivery).where(Delivery.route_id.in_(affected_ids)))
+            db.execute(delete(Route).where(Route.id.in_(affected_ids)))
+        db.delete(account)
+        db.commit()
+    return {"ok":True,"removed_routes":len(affected_ids)}
 
 @app.get("/api/routes",dependencies=[Depends(authorized)])
 async def routes():
