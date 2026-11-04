@@ -1,7 +1,8 @@
-import os, asyncio, io, logging, secrets, sqlite3, tempfile
+import os, asyncio, io, logging, secrets, sqlite3, tempfile, mimetypes
 from pathlib import Path
 from cryptography.fernet import Fernet
 from telethon import TelegramClient, events
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
@@ -187,9 +188,32 @@ class SyncEngine:
                     raw=await event.message.download_media(file=bytes)
                     if not raw: raise ValueError("지원하지 않는 첨부 형식입니다")
                     if len(raw)>20*1024*1024: raise ValueError("첨부파일 용량 제한 초과 (20MB)")
-                    buffer=io.BytesIO(raw)
-                    buffer.name=getattr(event.message.file,"name",None) or "attachment"
-                    sent=await c.send_file(entity,buffer,caption=event.raw_text or "")
+                    media = event.message.media
+                    file_info = event.message.file
+                    original_name = getattr(file_info, "name", None) if file_info else None
+                    mime_type = getattr(file_info, "mime_type", None) if file_info else None
+                    # Telegram needs a meaningful extension to display uploaded bytes
+                    # as an in-chat photo/video rather than an unnamed document.
+                    if isinstance(media, MessageMediaPhoto):
+                        filename = "photo.jpg"
+                        mime_type = "image/jpeg"
+                        send_as_document = False
+                    elif isinstance(media, MessageMediaDocument):
+                        extension = mimetypes.guess_extension(mime_type or "") or ""
+                        if mime_type == "image/jpeg": extension = ".jpg"
+                        elif mime_type == "video/mp4": extension = ".mp4"
+                        filename = original_name or ("media" + extension if extension else "attachment.bin")
+                        send_as_document = not bool(mime_type and (mime_type.startswith("image/") or mime_type.startswith("video/")))
+                    else:
+                        raise ValueError("현재 자동 전달에서 지원하지 않는 미디어 형식입니다")
+                    buffer = io.BytesIO(raw)
+                    buffer.name = filename
+                    sent = await c.send_file(
+                        entity, buffer, caption=event.raw_text or "",
+                        force_document=send_as_document,
+                        supports_streaming=bool(mime_type and mime_type.startswith("video/")),
+                        formatting_entities=event.message.entities or None
+                    )
                 else:
                     if not event.raw_text: raise ValueError("전송할 내용이 없습니다")
                     sent=await c.send_message(entity,event.raw_text,
