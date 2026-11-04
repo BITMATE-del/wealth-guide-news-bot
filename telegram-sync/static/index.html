@@ -799,6 +799,9 @@
       const me=await api("/me");
       if(!me.logged_in)return;
       csrf=me.csrf;isOwner=!!me.is_owner;
+      // Keep the customer and owner interfaces at their respective entry URLs.
+      if(location.pathname==="/app"&&isOwner){location.replace("/admin");return}
+      if(location.pathname==="/admin"&&!isOwner){location.replace("/app");return}
       $("login").classList.add("hide");
       $("workspace").classList.remove("hide");
       $("licensesMenu").classList.toggle("hide",!isOwner);
@@ -1168,6 +1171,22 @@
       });
     }
 
+    // Dedicated entry points share one secured backend but show only the
+    // intended login experience. Access control remains server-side.
+    function setupEntryPage(){
+      const path=location.pathname;
+      if(path==="/app"){
+        $("ownerLoginTab").classList.add("hide");
+        loginTab("customer");
+        document.title="텔레그램 그룹 동기화 · 고객";
+      }else if(path==="/admin"){
+        $("customerLoginTab").classList.add("hide");
+        $("activateTab").classList.add("hide");
+        loginTab("owner");
+        document.title="텔레그램 그룹 동기화 · 라이선스 관리자";
+      }
+    }
+    setupEntryPage();
     start().catch(()=>{});
   </script>
 </body>
