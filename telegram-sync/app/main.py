@@ -369,19 +369,23 @@ async def delete_account(account_id:int,request:Request):
     return {"ok":True,"removed_routes":len(affected_ids)}
 
 @app.get("/api/settings/delivery",dependencies=[Depends(authorized)])
-async def get_delivery_settings():
+async def get_delivery_settings(request:Request):
+    license_id=get_identity(request)
+    key="delivery_pace" if license_id is None else "delivery_pace:"+str(license_id)
     with SessionLocal() as db:
-        row=db.get(SyncSetting,"delivery_pace")
+        row=db.get(SyncSetting,key)
         return {"mode":row.value if row else "normal"}
 
 @app.put("/api/settings/delivery",dependencies=[Depends(authorized)])
-async def set_delivery_settings(data:PaceSetting):
+async def set_delivery_settings(data:PaceSetting,request:Request):
+    license_id=get_identity(request)
     if data.mode not in ("off","fast","normal","relaxed"):
         raise HTTPException(400,"전달 간격을 선택하세요")
+    key="delivery_pace" if license_id is None else "delivery_pace:"+str(license_id)
     with SessionLocal() as db:
-        row=db.get(SyncSetting,"delivery_pace")
+        row=db.get(SyncSetting,key)
         if row: row.value=data.mode
-        else: db.add(SyncSetting(key="delivery_pace",value=data.mode))
+        else: db.add(SyncSetting(key=key,value=data.mode))
         db.commit()
     return {"ok":True,"mode":data.mode}
 
