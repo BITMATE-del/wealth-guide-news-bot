@@ -757,8 +757,8 @@
         const a=accounts.find(item=>item.id===id);
         if(!a)throw Error('삭제할 계정을 찾지 못했습니다');
         const affected=routes.filter(r=>r.watcher_id===id||r.fixed_id===id).length;
-        const message='['+a.label+'] 계정을 삭제할까요?\\n'+
-          '이 계정의 로그인 세션을 제거하며, 이 계정이 감지 또는 발신을 담당하는 전달 설정 '+affected+'개와 해당 전송 기록도 삭제됩니다.\\n'+
+        const message='['+a.label+'] 계정을 삭제할까요?\n'+
+          '이 계정의 로그인 세션을 제거하며, 이 계정이 감지 또는 발신을 담당하는 전달 설정 '+affected+'개와 해당 전송 기록도 삭제됩니다.\n'+
           '텔레그램 계정 자체나 기존 그룹 메시지는 삭제되지 않습니다.';
         if(!window.confirm(message))return;
         const result=await api('/accounts/'+id,'DELETE');
