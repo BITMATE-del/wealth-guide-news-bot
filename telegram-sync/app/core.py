@@ -80,7 +80,7 @@ class SyncEngine:
             raise ValueError("Telethon .session 파일만 업로드할 수 있습니다")
         if not contents or len(contents) > 2 * 1024 * 1024:
             raise ValueError("파일 크기는 2MB 이하여야 합니다")
-        if not contents.startswith(b"SQLite format 3\\x00"):
+        if not contents.startswith(b"SQLite format 3\x00"):
             raise ValueError("Telethon 세션 파일 형식이 아닙니다")
         with tempfile.TemporaryDirectory(prefix="tg-session-") as directory:
             path = Path(directory) / "uploaded.session"
