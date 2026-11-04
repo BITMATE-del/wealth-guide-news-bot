@@ -234,6 +234,18 @@ class SyncEngine:
                 if not c: raise ValueError("전송 계정이 연결되어 있지 않습니다")
                 pace_lock=await self.pace_sender(sender_id,event.message,owner_license_id)
                 try:
+                    # Revalidate immediately before sending: a license could expire,
+                    # a device reset could be approved, or a rule could be disabled
+                    # while this message waits in the pacing queue.
+                    with SessionLocal() as db:
+                        if owner_license_id is not None and not license_active(db.get(License,owner_license_id)):
+                            raise ValueError("라이선스가 만료되거나 기기가 초기화되어 전송을 중단했습니다")
+                        current_sender=db.get(Account,sender_id)
+                        if current_sender is None or not current_sender.enabled or current_sender.license_id!=owner_license_id:
+                            raise ValueError("발신 계정이 현재 라이선스에서 사용 불가합니다")
+                        current_route=db.get(Route,route.id)
+                        if current_route is None or not current_route.active:
+                            raise ValueError("전달 설정이 중지되거나 삭제됐습니다")
                     entity = await c.get_input_entity(route.target_chat)
                     if event.message.media:
                         raw=await event.message.download_media(file=bytes)
