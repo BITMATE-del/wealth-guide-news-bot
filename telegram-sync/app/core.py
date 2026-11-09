@@ -124,6 +124,34 @@ class SyncEngine:
             try: await item["client"].disconnect()
             except Exception: log.warning("Expired Telegram login session cleanup failed")
 
+    @staticmethod
+    def code_delivery_info(sent):
+        # Telegram explicitly specifies how a login code is delivered.
+        # Do not claim an SMS was sent if the API selected an in-app code.
+        kind=type(getattr(sent,"type",None)).__name__
+        info={"delivery_type":"unknown","delivery_hint":"텔레그램이 전달 방식을 명시하지 않았습니다. 다른 로그인 기기를 확인하세요."}
+        if kind=="SentCodeTypeApp":
+            info={"delivery_type":"app","delivery_hint":"텔레그램 앱의 공식 Telegram 인증 알림으로 전송하도록 지정됐습니다. 이미 로그인한 다른 휴대폰·PC의 Telegram 대화를 확인하세요."}
+        elif kind in ("SentCodeTypeSms","SentCodeTypeFirebaseSms"):
+            info={"delivery_type":"sms","delivery_hint":"텔레그램에서 SMS 인증 방식을 지정했습니다. 해당 번호의 문자함과 스팸함을 확인하세요."}
+        elif kind=="SentCodeTypeCall":
+            info={"delivery_type":"call","delivery_hint":"텔레그램에서 전화 통화 인증을 지정했습니다. 해당 번호의 수신 전화와 차단 설정을 확인하세요."}
+        elif kind=="SentCodeTypeFlashCall":
+            info={"delivery_type":"call","delivery_hint":"텔레그램에서 전화번호 확인 통화를 지정했습니다. 번호의 수신 통화 내역을 확인하세요."}
+        elif kind=="SentCodeTypeMissedCall":
+            info={"delivery_type":"call","delivery_hint":"텔레그램에서 부재중 전화 인증을 지정했습니다. 수신 통화 내역을 확인하세요."}
+        elif kind=="SentCodeTypeEmailCode":
+            info={"delivery_type":"email","delivery_hint":"텔레그램에서 이메일 인증을 지정했습니다. 텔레그램 계정에 설정된 이메일 수신함과 스팸함을 확인하세요."}
+        elif kind=="SentCodeTypeFragmentSms":
+            info={"delivery_type":"fragment","delivery_hint":"텔레그램에서 Fragment 인증 방식을 지정했습니다. 관련 Telegram/Fragment 안내를 확인하세요."}
+        elif kind=="SentCodeTypeSetUpEmailRequired":
+            info={"delivery_type":"email_setup","delivery_hint":"텔레그램에서 이메일 인증 설정을 먼저 요구하고 있습니다. 공식 텔레그램 앱에서 이메일 설정을 확인하세요."}
+        elif kind=="SentCodeTypeSmsWord":
+            info={"delivery_type":"sms","delivery_hint":"텔레그램에서 문자 기반 인증을 지정했습니다. 해당 번호의 메시지를 확인하세요."}
+        elif kind=="SentCodeTypeSmsPhrase":
+            info={"delivery_type":"sms","delivery_hint":"텔레그램에서 문자 기반 인증을 지정했습니다. 해당 번호의 메시지를 확인하세요."}
+        return info
+
     async def phone_start(self, phone, license_id=None):
         # Avoid repeated send_code_request calls for an active phone session.
         # Reuse the existing code hash until it expires instead of triggering
@@ -134,7 +162,8 @@ class SyncEngine:
             for token,item in self.pending.items():
                 if item["phone"]==phone and item["license_id"]==license_id:
                     remaining=max(0,int(300-(now-item["created"])))
-                    return {"token":token,"reused":True,"expires_in":remaining}
+                    return {"token":token,"reused":True,"expires_in":remaining,
+                            **item.get("delivery",{})}
             if len(self.pending)>=8:
                 raise ValueError("진행 중인 인증 요청이 많습니다. 약 5분 후 다시 시도하세요")
             c=self.make_client()
@@ -146,9 +175,12 @@ class SyncEngine:
                 except Exception: pass
                 raise
             token=secrets.token_urlsafe(32)
+            delivery=self.code_delivery_info(sent)
+            log.info("Telegram code request accepted: delivery_type=%s",delivery["delivery_type"])
             self.pending[token]={"client":c,"phone":phone,"hash":sent.phone_code_hash,
-                                 "license_id":license_id,"created":asyncio.get_running_loop().time()}
-            return {"token":token,"reused":False,"expires_in":300}
+                                 "license_id":license_id,"created":asyncio.get_running_loop().time(),
+                                 "delivery":delivery}
+            return {"token":token,"reused":False,"expires_in":300,**delivery}
 
     async def phone_finish(self, token, code, password, label, license_id=None):
         item = self.pending.get(token)
