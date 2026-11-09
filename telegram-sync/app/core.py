@@ -22,6 +22,7 @@ class SyncEngine:
         self.locks = {}
         self.next_send_at = {}
         self.member_count_cache = {}
+        self.phone_start_lock = asyncio.Lock()
     def encrypt(self, s): return self.cipher.encrypt(s.encode()).decode()
     def decrypt(self, s): return self.cipher.decrypt(s.encode()).decode()
     def make_client(self, session=""):
@@ -114,18 +115,41 @@ class SyncEngine:
             finally:
                 await client.disconnect()
 
+    async def cleanup_phone_requests(self):
+        now=asyncio.get_running_loop().time()
+        expired=[(token,item) for token,item in list(self.pending.items())
+                 if now-item["created"]>300]
+        for token,item in expired:
+            self.pending.pop(token,None)
+            try: await item["client"].disconnect()
+            except Exception: log.warning("Expired Telegram login session cleanup failed")
+
     async def phone_start(self, phone, license_id=None):
-        if len(self.pending) >= 8: raise ValueError("인증 요청이 너무 많습니다")
-        c = self.make_client()
-        await c.connect()
-        try: sent = await c.send_code_request(phone)
-        except Exception:
-            await c.disconnect()
-            raise
-        token = secrets.token_urlsafe(32)
-        self.pending[token] = {"client":c,"phone":phone,"hash":sent.phone_code_hash,"license_id":license_id,
-                               "created":asyncio.get_running_loop().time()}
-        return {"token":token}
+        # Avoid repeated send_code_request calls for an active phone session.
+        # Reuse the existing code hash until it expires instead of triggering
+        # Telegram's phone-code and API rate limits.
+        async with self.phone_start_lock:
+            await self.cleanup_phone_requests()
+            now=asyncio.get_running_loop().time()
+            for token,item in self.pending.items():
+                if item["phone"]==phone and item["license_id"]==license_id:
+                    remaining=max(0,int(300-(now-item["created"])))
+                    return {"token":token,"reused":True,"expires_in":remaining}
+            if len(self.pending)>=8:
+                raise ValueError("진행 중인 인증 요청이 많습니다. 약 5분 후 다시 시도하세요")
+            c=self.make_client()
+            try:
+                await asyncio.wait_for(c.connect(),timeout=20)
+                sent=await asyncio.wait_for(c.send_code_request(phone),timeout=35)
+            except Exception:
+                try: await c.disconnect()
+                except Exception: pass
+                raise
+            token=secrets.token_urlsafe(32)
+            self.pending[token]={"client":c,"phone":phone,"hash":sent.phone_code_hash,
+                                 "license_id":license_id,"created":asyncio.get_running_loop().time()}
+            return {"token":token,"reused":False,"expires_in":300}
+
     async def phone_finish(self, token, code, password, label, license_id=None):
         item = self.pending.get(token)
         if not item: raise ValueError("인증 요청을 다시 시작하세요")
