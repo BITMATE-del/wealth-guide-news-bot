@@ -1,7 +1,7 @@
 import os, asyncio, io, logging, secrets, sqlite3, tempfile, mimetypes
 from pathlib import Path
 from cryptography.fernet import Fernet
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
@@ -152,6 +152,71 @@ class SyncEngine:
             info={"delivery_type":"sms","delivery_hint":"텔레그램에서 문자 기반 인증을 지정했습니다. 해당 번호의 메시지를 확인하세요."}
         return info
 
+    @staticmethod
+    def next_delivery_info(sent):
+        next_type=getattr(sent,"next_type",None)
+        type_name=type(next_type).__name__
+        type_labels={
+            "CodeTypeSms":"SMS",
+            "CodeTypeCall":"전화",
+            "CodeTypeFlashCall":"전화",
+            "CodeTypeMissedCall":"부재중 전화",
+            "CodeTypeFragmentSms":"Fragment",
+            "CodeTypeFirebaseSms":"Firebase SMS",
+        }
+        timeout=getattr(sent,"timeout",None)
+        timeout=max(0,int(timeout)) if isinstance(timeout,int) else 0
+        return {
+            "next_type":type_labels.get(type_name),
+            "resend_after":timeout,
+            "next_type_available":bool(next_type),
+        }
+
+    def pending_phone_status(self, token, item, reused=False):
+        now=asyncio.get_running_loop().time()
+        info=item.get("delivery",{})
+        return {
+            "token":token,"reused":reused,
+            "expires_in":max(0,int(300-(now-item["created"]))),
+            "resend_after":max(0,int(item.get("resend_at",now)-now+0.999)),
+            "next_type_available":bool(item.get("next_type_available")),
+            "next_type":item.get("next_type"),
+            **info,
+        }
+
+    async def phone_resend(self, token, license_id=None):
+        async with self.phone_start_lock:
+            await self.cleanup_phone_requests()
+            item=self.pending.get(token)
+            if not item or item["license_id"] != license_id:
+                raise ValueError("인증 요청이 만료되었거나 다른 계정의 요청입니다. 처음부터 다시 시도하세요")
+            if not item.get("next_type_available"):
+                raise ValueError("텔레그램이 다른 인증 방법을 제공하지 않았습니다. 공식 앱의 Telegram 인증 대화를 확인하세요")
+            now=asyncio.get_running_loop().time()
+            if now<item.get("resend_at",now):
+                remaining=max(1,int(item["resend_at"]-now+0.999))
+                raise ValueError(f"텔레그램에서 허용하는 재전송 시점까지 {remaining}초 남았습니다")
+            if item.get("resend_count",0)>=2:
+                raise ValueError("재전송 횟수 제한에 도달했습니다. 반복 요청하지 말고 잠시 후 다시 시도하세요")
+            # Set a short server-side guard before network call to prevent
+            # accidental repeat sends if Telegram times out mid-request.
+            item["resend_at"]=now+60
+            item["resend_count"]=item.get("resend_count",0)+1
+            try:
+                sent=await asyncio.wait_for(item["client"](
+                    functions.auth.ResendCodeRequest(item["phone"],item["hash"])
+                ), timeout=35)
+            except Exception:
+                raise
+            item["hash"]=sent.phone_code_hash
+            item["delivery"]=self.code_delivery_info(sent)
+            nxt=self.next_delivery_info(sent)
+            item["next_type_available"]=nxt["next_type_available"]
+            item["next_type"]=nxt["next_type"]
+            item["resend_at"]=asyncio.get_running_loop().time()+max(30,nxt["resend_after"])
+            log.info("Telegram alternative code method accepted: delivery_type=%s",item["delivery"]["delivery_type"])
+            return self.pending_phone_status(token,item)
+
     async def phone_start(self, phone, license_id=None):
         # Avoid repeated send_code_request calls for an active phone session.
         # Reuse the existing code hash until it expires instead of triggering
@@ -162,8 +227,7 @@ class SyncEngine:
             for token,item in self.pending.items():
                 if item["phone"]==phone and item["license_id"]==license_id:
                     remaining=max(0,int(300-(now-item["created"])))
-                    return {"token":token,"reused":True,"expires_in":remaining,
-                            **item.get("delivery",{})}
+                    return self.pending_phone_status(token,item,reused=True)
             if len(self.pending)>=8:
                 raise ValueError("진행 중인 인증 요청이 많습니다. 약 5분 후 다시 시도하세요")
             c=self.make_client()
@@ -177,10 +241,16 @@ class SyncEngine:
             token=secrets.token_urlsafe(32)
             delivery=self.code_delivery_info(sent)
             log.info("Telegram code request accepted: delivery_type=%s",delivery["delivery_type"])
+            next_info=self.next_delivery_info(sent)
+            now=asyncio.get_running_loop().time()
             self.pending[token]={"client":c,"phone":phone,"hash":sent.phone_code_hash,
-                                 "license_id":license_id,"created":asyncio.get_running_loop().time(),
-                                 "delivery":delivery}
-            return {"token":token,"reused":False,"expires_in":300,**delivery}
+                                 "license_id":license_id,"created":now,
+                                 "delivery":delivery,
+                                 "resend_at":now+max(0,next_info["resend_after"]),
+                                 "next_type_available":next_info["next_type_available"],
+                                 "next_type":next_info["next_type"],
+                                 "resend_count":0}
+            return self.pending_phone_status(token,self.pending[token])
 
     async def phone_finish(self, token, code, password, label, license_id=None):
         item = self.pending.get(token)
