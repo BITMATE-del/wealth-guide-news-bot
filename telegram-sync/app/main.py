@@ -298,18 +298,50 @@ async def add_session_file(
     finally:
         await file.close()
 
+def telegram_auth_error(exc):
+    # Only show explicitly whitelisted, actionable messages; do not leak API
+    # keys, phone numbers, arbitrary Telegram RPC text or session data.
+    name=type(exc).__name__
+    if name=="FloodWaitError":
+        seconds=max(1,min(int(getattr(exc,"seconds",60)),86400))
+        return 429,f"텔레그램 요청 제한이 발생했습니다. {seconds}초 후 다시 시도하세요. 반복 클릭하지 마세요"
+    mapped={
+        "PhoneNumberInvalidError":"전화번호 형식이 올바르지 않습니다. 국가번호를 확인하세요",
+        "PhoneNumberBannedError":"텔레그램에서 제한된 전화번호입니다. 계정 상태를 확인하세요",
+        "PhoneNumberFloodError":"해당 번호의 인증 요청이 너무 많습니다. 텔레그램 제한이 해제된 후 다시 시도하세요",
+        "ApiIdPublishedFloodError":"텔레그램 API 요청 제한이 발생했습니다. 잠시 후 다시 시도하세요",
+        "PhoneCodeInvalidError":"인증코드가 올바르지 않습니다. 텔레그램 앱의 최신 코드를 확인하세요",
+        "PhoneCodeExpiredError":"인증코드가 만료됐습니다. 인증을 다시 시작하세요",
+        "PhoneCodeEmptyError":"인증코드를 입력하세요",
+        "PasswordHashInvalidError":"2단계 비밀번호가 올바르지 않습니다",
+        "AuthRestartError":"텔레그램이 인증 절차를 초기화했습니다. 다시 인증을 요청하세요",
+        "SessionPasswordNeededError":"텔레그램 2단계 비밀번호를 입력하세요",
+    }
+    if isinstance(exc,ValueError):
+        return 400,str(exc)
+    if isinstance(exc,TimeoutError):
+        return 504,"텔레그램 서버 응답 시간이 초과됐습니다. 잠시 후 다시 시도하세요"
+    return (429 if "Flood" in name else 400), mapped.get(
+        name,"텔레그램 인증 요청을 완료하지 못했습니다. 잠시 후 다시 시도하세요"
+    )
+
 @app.post("/api/accounts/phone/start",dependencies=[Depends(authorized)])
 async def phone_start(data:Phone,request:Request):
     if not re.fullmatch(r"\+[1-9]\d{7,14}",data.phone):
         raise HTTPException(400,"국가번호를 포함해 입력하세요. 예: +8210...")
-    try: return await engine.phone_start(data.phone,get_identity(request))
-    except Exception: raise HTTPException(400,"인증코드 요청에 실패했습니다. 잠시 후 다시 시도하세요")
+    try:
+        return await engine.phone_start(data.phone,get_identity(request))
+    except Exception as exc:
+        status,message=telegram_auth_error(exc)
+        raise HTTPException(status,message)
 
 @app.post("/api/accounts/phone/finish",dependencies=[Depends(authorized)])
 async def phone_finish(data:Verify,request:Request):
-    try: return await engine.phone_finish(data.token,data.code,data.password,data.label,get_identity(request))
-    except ValueError as e: raise HTTPException(400,str(e))
-    except Exception: raise HTTPException(400,"인증에 실패했습니다. 코드를 다시 확인하세요")
+    try:
+        return await engine.phone_finish(data.token,data.code,data.password,data.label,get_identity(request))
+    except Exception as exc:
+        status,message=telegram_auth_error(exc)
+        raise HTTPException(status,message)
 
 @app.get("/api/accounts/{account_id}/chats",dependencies=[Depends(authorized)])
 async def chats(account_id:int,request:Request):
