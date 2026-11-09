@@ -58,6 +58,7 @@ class ReviewReset(BaseModel):
 class BlockLicense(BaseModel):
     blocked:bool
 class Phone(BaseModel): phone:str
+class ResendCode(BaseModel): token:str
 class Verify(BaseModel):
     token:str
     code:str=""
@@ -331,6 +332,14 @@ async def phone_start(data:Phone,request:Request):
         raise HTTPException(400,"국가번호를 포함해 입력하세요. 예: +8210...")
     try:
         return await engine.phone_start(data.phone,get_identity(request))
+    except Exception as exc:
+        status,message=telegram_auth_error(exc)
+        raise HTTPException(status,message)
+
+@app.post("/api/accounts/phone/resend",dependencies=[Depends(authorized)])
+async def phone_resend(data:ResendCode,request:Request):
+    try:
+        return await engine.phone_resend(data.token,get_identity(request))
     except Exception as exc:
         status,message=telegram_auth_error(exc)
         raise HTTPException(status,message)
