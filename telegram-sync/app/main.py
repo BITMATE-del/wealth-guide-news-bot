@@ -231,6 +231,41 @@ async def block_license(license_id:int,data:BlockLicense,request:Request):
         db.commit()
     return {"ok":True}
 
+@app.get("/api/admin/license-usage",dependencies=[Depends(authorized)])
+async def license_usage(request:Request):
+    # Owner-only, read-only license workspace overview. Keep customer account
+    # details, Telegram sessions, chat contents and settings out of this view.
+    require_owner(request)
+    with SessionLocal() as db:
+        licenses=list(db.scalars(select(License).order_by(License.id.desc())))
+        rows=list(db.scalars(select(Account)))
+        route_rows=list(db.execute(select(Route.watcher_id,Route.active)))
+        grouped={}
+        for account in rows:
+            if account.license_id is None:
+                continue
+            entry=grouped.setdefault(account.license_id,{
+                "account_count":0,"connected_count":0,"route_count":0,"active_route_count":0
+            })
+            entry["account_count"]+=1
+            if account.enabled and account.id in engine.clients:
+                entry["connected_count"]+=1
+        owners={account.id:account.license_id for account in rows}
+        for watcher_id,active in route_rows:
+            license_id=owners.get(watcher_id)
+            if license_id is None:
+                continue
+            entry=grouped.setdefault(license_id,{
+                "account_count":0,"connected_count":0,"route_count":0,"active_route_count":0
+            })
+            entry["route_count"]+=1
+            if active:
+                entry["active_route_count"]+=1
+        return [{"license_id":license.id,"label":license.label,"prefix":license.code_prefix,
+                 **grouped.get(license.id,{
+                     "account_count":0,"connected_count":0,"route_count":0,"active_route_count":0
+                 })} for license in licenses]
+
 @app.get("/api/admin/device-resets",dependencies=[Depends(authorized)])
 async def reset_requests(request:Request):
     require_owner(request)
@@ -256,17 +291,18 @@ async def review_device_reset(reset_id:int,data:ReviewReset,request:Request):
 
 def scoped_account(db, account_id, license_id):
     row=db.get(Account,account_id)
-    if not row or (license_id is not None and row.license_id!=license_id):
+    # None means the owner's own workspace, not a wildcard for all licenses.
+    if not row or row.license_id!=license_id:
         raise HTTPException(404,"계정이 없습니다")
     return row
 
 def scoped_route(db, route_id, license_id):
     row=db.get(Route,route_id)
-    if not row: raise HTTPException(404,"전달 설정이 없습니다")
-    if license_id is not None:
-        watcher=db.get(Account,row.watcher_id)
-        if not watcher or watcher.license_id!=license_id:
-            raise HTTPException(404,"전달 설정이 없습니다")
+    if not row:
+        raise HTTPException(404,"전달 설정이 없습니다")
+    watcher=db.get(Account,row.watcher_id)
+    if not watcher or watcher.license_id!=license_id:
+        raise HTTPException(404,"전달 설정이 없습니다")
     return row
 
 @app.get("/api/accounts",dependencies=[Depends(authorized)])
@@ -274,7 +310,7 @@ async def accounts(request:Request):
     license_id=get_identity(request)
     with SessionLocal() as db:
         query=select(Account).order_by(Account.id)
-        if license_id is not None: query=query.where(Account.license_id==license_id)
+        query=query.where(Account.license_id==license_id if license_id is not None else Account.license_id.is_(None))
         rows=db.scalars(query).all()
         return [{"id":a.id,"label":a.label,"username":a.username,"telegram_id":a.tg_id,
                  "enabled":a.enabled,"connected":a.id in engine.clients} for a in rows]
@@ -375,14 +411,12 @@ async def chats(account_id:int,request:Request):
 async def chat_names(request:Request):
     license_id=get_identity(request)
     with SessionLocal() as db:
-        if license_id is None:
-            rows=db.scalars(select(ChatName)).all()
-        else:
-            ids=set()
-            for route in db.scalars(select(Route).join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)):
-                ids.add(route.source_chat)
-                ids.add(route.target_chat)
-            rows=list(db.scalars(select(ChatName).where(ChatName.chat_id.in_(ids)))) if ids else []
+        ids=set()
+        account_filter=Account.license_id==license_id if license_id is not None else Account.license_id.is_(None)
+        for route in db.scalars(select(Route).join(Account,Route.watcher_id==Account.id).where(account_filter)):
+            ids.add(route.source_chat)
+            ids.add(route.target_chat)
+        rows=list(db.scalars(select(ChatName).where(ChatName.chat_id.in_(ids)))) if ids else []
         return {str(row.chat_id):row.name for row in rows}
 
 @app.patch("/api/accounts/{account_id}",dependencies=[Depends(authorized)])
@@ -442,9 +476,8 @@ async def set_delivery_settings(data:PaceSetting,request:Request):
 async def routes(request:Request):
     license_id=get_identity(request)
     with SessionLocal() as db:
-        query=select(Route).order_by(desc(Route.id))
-        if license_id is not None:
-            query=query.join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)
+        account_filter=Account.license_id==license_id if license_id is not None else Account.license_id.is_(None)
+        query=select(Route).join(Account,Route.watcher_id==Account.id).where(account_filter).order_by(desc(Route.id))
         rows=db.scalars(query).all()
         return [{"id":r.id,"watcher_id":r.watcher_id,"source_chat":r.source_chat,"target_chat":r.target_chat,
                  "sender_filter":r.sender_filter,"mode":r.mode,"fixed_id":r.fixed_id,"active":r.active} for r in rows]
@@ -524,9 +557,10 @@ async def delete_route(route_id:int,request:Request):
 async def logs(request:Request):
     license_id=get_identity(request)
     with SessionLocal() as db:
-        query=select(Delivery).order_by(desc(Delivery.id)).limit(100)
-        if license_id is not None:
-            query=query.join(Route,Delivery.route_id==Route.id).join(Account,Route.watcher_id==Account.id).where(Account.license_id==license_id)
+        account_filter=Account.license_id==license_id if license_id is not None else Account.license_id.is_(None)
+        query=select(Delivery).join(Route,Delivery.route_id==Route.id).join(
+            Account,Route.watcher_id==Account.id
+        ).where(account_filter).order_by(desc(Delivery.id)).limit(100)
         rows=db.scalars(query).all()
         return [{"id":d.id,"route_id":d.route_id,"status":d.status,"error":d.error,
                  "created_at":d.created_at.isoformat()} for d in rows]
