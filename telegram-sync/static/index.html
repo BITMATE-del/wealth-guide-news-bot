@@ -752,13 +752,20 @@
     async function loadLicenses(){
       if(!isOwner)return;
       await run(async()=>{
-        const [licenses,resets]=await Promise.all([api("/admin/licenses"),api("/admin/device-resets")]);
+        const [licenses,resets,usage]=await Promise.all([
+          api("/admin/licenses"),api("/admin/device-resets"),api("/admin/license-usage")
+        ]);
+        const usageById=new Map(usage.map(item=>[item.license_id,item]));
         $("licenseList").innerHTML=licenses.length?licenses.map(l=>
           '<div class="list-item"><div><div class="list-item-title">'+safe(l.label||"고객")+
           ' <span class="badge">'+safe(licenseStatus(l))+'</span></div>'+
           '<div class="list-item-sub">키: '+safe(l.prefix)+'… · '+l.duration_days+'일 · '+(l.expires_at?'만료: '+safe(new Date(l.expires_at).toLocaleString("ko-KR")):'등록 후 기간 시작')+'</div>'+
           '<div class="list-item-sub">등록 기기: '+(l.device_bound?'지정됨':'미지정')+
-          (l.device_ip?' · 마지막 등록 IP '+safe(l.device_ip):'')+'</div></div>'+
+          (l.device_ip?' · 마지막 등록 IP '+safe(l.device_ip):'')+'</div>'+
+          '<div class="list-item-sub" style="margin-top:7px">고객 사용 현황 · 텔레그램 계정 '+
+          (usageById.get(l.id)?.account_count||0)+'개 (연결 '+(usageById.get(l.id)?.connected_count||0)+
+          '개) · 전달 설정 '+(usageById.get(l.id)?.route_count||0)+'개 (작동 중 '+
+          (usageById.get(l.id)?.active_route_count||0)+'개)</div></div>'+
           '<button class="btn" onclick="toggleLicenseBlock('+l.id+','+(!l.blocked)+')">'+(l.blocked?'정지 해제':'사용 정지')+'</button></div>'
         ).join(""):renderEmpty("발급한 라이선스가 없습니다.");
         const byId=new Map(licenses.map(l=>[l.id,l]));
