@@ -549,7 +549,7 @@
               </div>
               <div class="field">
                 <label class="label" for="source">메인방</label>
-                <select id="source" onchange="updateTargetOptions()"></select>
+                <select id="source" onchange="this.dataset.sourceId=this.value;updateTargetOptions()"></select>
               </div>
               <div class="field full">
                 <label class="label" for="targetSearch">전달할 서브방</label>
