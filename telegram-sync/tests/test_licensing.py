@@ -87,11 +87,16 @@ class LicenseFlowTests(unittest.TestCase):
                         license_id=ids["B"], label="B-Admin", tg_id=100002,
                         session_encrypted="not-a-real-session", enabled=True,
                     )
-                    db.add_all([account_a, account_b])
+                    owner_account = Account(
+                        license_id=None, label="Owner-Only", tg_id=100003,
+                        session_encrypted="not-a-real-session", enabled=True,
+                    )
+                    db.add_all([account_a, account_b, owner_account])
                     db.commit()
                     db.refresh(account_a)
                     db.refresh(account_b)
-                    aid, bid = account_a.id, account_b.id
+                    db.refresh(owner_account)
+                    aid, bid, oid = account_a.id, account_b.id, owner_account.id
 
                     route_b = Route(
                         watcher_id=bid, source_chat=-2000, target_chat=-3000,
@@ -101,8 +106,73 @@ class LicenseFlowTests(unittest.TestCase):
                     db.commit()
                     db.refresh(route_b)
                     rid_b = route_b.id
-                    db.add(Delivery(route_id=rid_b, source_id=10, status="sent"))
+                    owner_route = Route(
+                        watcher_id=oid, source_chat=-9000, target_chat=-9001,
+                        mode="same", active=True,
+                    )
+                    db.add(owner_route)
                     db.commit()
+                    db.refresh(owner_route)
+                    rid_owner = owner_route.id
+                    db.add_all([
+                        Delivery(route_id=rid_b, source_id=10, status="sent"),
+                        Delivery(route_id=rid_owner, source_id=11, status="sent"),
+                    ])
+                    db.commit()
+
+                # The owner is a separate workspace, not a superuser wildcard.
+                self.assertEqual(
+                    [a["label"] for a in owner.get("/api/accounts").json()],
+                    ["Owner-Only"],
+                )
+                self.assertEqual(
+                    [route["id"] for route in owner.get("/api/routes").json()],
+                    [rid_owner],
+                )
+                self.assertEqual(
+                    [log["route_id"] for log in owner.get("/api/logs").json()],
+                    [rid_owner],
+                )
+                self.assertEqual(owner.get(f"/api/accounts/{aid}/chats").status_code, 404)
+                self.assertEqual(
+                    owner.patch(f"/api/routes/{rid_b}", json={"enabled": False}, headers=owner_headers).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    owner.post(
+                        "/api/routes/bulk",
+                        json={"route_ids": [rid_b], "enabled": False},
+                        headers=owner_headers,
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    owner.delete(f"/api/routes/{rid_b}", headers=owner_headers).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    owner.post(
+                        "/api/routes",
+                        json={
+                            "watcher_id": aid,
+                            "source_chat": -100,
+                            "target_chat": -101,
+                            "mode": "same",
+                        },
+                        headers=owner_headers,
+                    ).status_code,
+                    404,
+                )
+                usage=owner.get("/api/admin/license-usage")
+                self.assertEqual(usage.status_code, 200, usage.text)
+                usage_by_id={item["license_id"]:item for item in usage.json()}
+                self.assertEqual(usage_by_id[ids["A"]]["account_count"], 1)
+                self.assertEqual(usage_by_id[ids["B"]]["route_count"], 1)
+                self.assertEqual(usage_by_id[ids["B"]]["active_route_count"], 1)
+                self.assertEqual(usage_by_id[ids["C"]]["account_count"], 0)
+                self.assertEqual(client_a.get("/api/admin/license-usage").status_code, 403)
+                self.assertEqual(client_a.get(f"/api/accounts/{oid}/chats").status_code, 404)
+                self.assertEqual(client_a.get("/api/routes").json(), [])
 
                 self.assertEqual([a["label"] for a in client_a.get("/api/accounts").json()], ["A-Admin"])
                 self.assertEqual([a["label"] for a in client_b.get("/api/accounts").json()], ["B-Admin"])
