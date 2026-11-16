@@ -1,4 +1,4 @@
-import os, asyncio, io, logging, secrets, sqlite3, tempfile, mimetypes
+import os, asyncio, io, logging, secrets, sqlite3, tempfile, mimetypes, hashlib
 from pathlib import Path
 from cryptography.fernet import Fernet
 from telethon import TelegramClient, events, functions
@@ -7,7 +7,7 @@ from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from .models import SessionLocal, Account, Route, Delivery, SyncSetting, License
+from .models import SessionLocal, Account, Route, Delivery, SyncSetting, License, ForwardClaim
 from .licensing import license_active
 
 log = logging.getLogger("group_sync")
@@ -23,6 +23,7 @@ class SyncEngine:
         self.next_send_at = {}
         self.member_count_cache = {}
         self.phone_start_lock = asyncio.Lock()
+        self.recent_forwarded = {}
     def encrypt(self, s): return self.cipher.encrypt(s.encode()).decode()
     def decrypt(self, s): return self.cipher.decrypt(s.encode()).decode()
     def make_client(self, session=""):
@@ -358,6 +359,31 @@ class SyncEngine:
             lock.release()
             raise
 
+    @staticmethod
+    def forward_fingerprint(message):
+        # Guard short-lived forwarding loops; the permanent DB claim below
+        # handles exact source-message duplication across watcher accounts.
+        text=(getattr(message,"raw_text","") or "").strip()
+        media=getattr(message,"media",None)
+        kind=type(media).__name__ if media else "text"
+        # Do not treat separate captionless images as equivalent.
+        if not text: return None
+        return hashlib.sha256((kind+"\\0"+text).encode("utf-8")).hexdigest()
+
+    def was_recently_forwarded(self, license_id, chat_id, message):
+        signature=self.forward_fingerprint(message)
+        if not signature: return False
+        now=asyncio.get_running_loop().time()
+        return self.recent_forwarded.get((license_id or 0,chat_id,signature),0)>now
+
+    def mark_forwarded(self, license_id, chat_id, message):
+        signature=self.forward_fingerprint(message)
+        if not signature: return
+        now=asyncio.get_running_loop().time()
+        if len(self.recent_forwarded)>4000:
+            self.recent_forwarded={k:v for k,v in self.recent_forwarded.items() if v>now}
+        self.recent_forwarded[(license_id or 0,chat_id,signature)]=now+180
+
     async def on_message(self, watcher_id, event):
         if not event.chat_id or not event.sender_id: return
         # A message already delivered by this service must not trigger another forwarding route.
@@ -374,6 +400,10 @@ class SyncEngine:
             routes = list(db.scalars(select(Route).where(Route.active == True,
                 Route.watcher_id == watcher_id, Route.source_chat == event.chat_id)))
             owner_license_id=watcher.license_id
+        # Any freshly mirrored caption/text must never be treated as new
+        # source content, even before Telegram returns its sent message ID.
+        if self.was_recently_forwarded(owner_license_id,event.chat_id,event.message):
+            return
         for route in routes:
             if route.sender_filter and route.sender_filter != event.sender_id: continue
             if route.target_chat == event.chat_id: continue
@@ -383,7 +413,22 @@ class SyncEngine:
                     a = db.scalar(select(Account).where(Account.tg_id == event.sender_id,Account.enabled == True,
                         Account.license_id == owner_license_id if owner_license_id is not None else Account.license_id.is_(None)))
                     sender_id = a.id if a else None
+            # Claim before sending. Without this, the same source message
+            # observed by multiple watcher accounts can reach the same target
+            # through distinct route IDs and be duplicated.
+            claim_id=None
             with SessionLocal() as db:
+                claim=ForwardClaim(license_scope=owner_license_id or 0,
+                                   source_chat=event.chat_id,source_id=event.id,
+                                   target_chat=route.target_chat)
+                db.add(claim)
+                try:
+                    db.commit()
+                    db.refresh(claim)
+                    claim_id=claim.id
+                except IntegrityError:
+                    db.rollback()
+                    continue
                 item=Delivery(route_id=route.id,source_id=event.id,sender_id=sender_id)
                 db.add(item)
                 try:
@@ -392,6 +437,8 @@ class SyncEngine:
                     delivery_id=item.id
                 except IntegrityError:
                     db.rollback()
+                    db.delete(claim)
+                    db.commit()
                     continue
             status, target_id, error = "failed", None, None
             try:
@@ -411,6 +458,9 @@ class SyncEngine:
                         current_route=db.get(Route,route.id)
                         if current_route is None or not current_route.active:
                             raise ValueError("전달 설정이 중지되거나 삭제됐습니다")
+                    # Register mirrored content before the send finishes to
+                    # close the race with NewMessage echo events.
+                    self.mark_forwarded(owner_license_id,route.target_chat,event.message)
                     entity = await c.get_input_entity(route.target_chat)
                     if event.message.media:
                         raw=await event.message.download_media(file=bytes)
@@ -459,4 +509,7 @@ class SyncEngine:
                 delivery.status=status
                 delivery.target_id=target_id
                 delivery.error=error
+                if status!="sent" and claim_id is not None:
+                    claim=db.get(ForwardClaim,claim_id)
+                    if claim is not None: db.delete(claim)
                 db.commit()
