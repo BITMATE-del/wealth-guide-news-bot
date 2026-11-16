@@ -66,6 +66,20 @@ class SyncSetting(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(String(80))
 
+class ForwardClaim(Base):
+    # A unique claim for each original chat/message and destination, regardless
+    # of how many watcher accounts or routes observe the same source message.
+    __tablename__ = "sync_forward_claims"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    license_scope: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_chat: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_chat: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint(
+        "license_scope","source_chat","source_id","target_chat",name="uq_sync_forward_claim"
+    ),)
+
 class Delivery(Base):
     __tablename__ = "sync_deliveries"
     id: Mapped[int] = mapped_column(primary_key=True)
