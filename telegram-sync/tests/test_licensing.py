@@ -245,5 +245,72 @@ class LicenseFlowTests(unittest.TestCase):
                 self.assertEqual(client_b.get("/api/accounts").status_code, 403)
 
 
+    def test_same_message_two_watchers_sends_once_and_mirror_does_not_loop(self):
+        import asyncio
+        from types import SimpleNamespace
+        from sqlalchemy import select
+        from app.main import engine
+        from app.models import Account, Route, ForwardClaim, SessionLocal, SyncSetting
+
+        class MockClient:
+            def __init__(self):
+                self.sent=[]
+            async def get_input_entity(self, chat):
+                return chat
+            async def send_message(self, chat, text, **kw):
+                self.sent.append((chat,text))
+                return SimpleNamespace(id=40000+len(self.sent))
+
+        with SessionLocal() as db:
+            watcher_a=Account(
+                license_id=None,label="Loop Test A",tg_id=7700001,
+                session_encrypted="test-session-not-connected",enabled=True)
+            watcher_b=Account(
+                license_id=None,label="Loop Test B",tg_id=7700002,
+                session_encrypted="test-session-not-connected",enabled=True)
+            db.add_all([watcher_a,watcher_b])
+            setting=db.get(SyncSetting,"delivery_pace")
+            if setting: setting.value="off"
+            else: db.add(SyncSetting(key="delivery_pace",value="off"))
+            db.commit()
+            db.refresh(watcher_a);db.refresh(watcher_b)
+            watcher_a_id,watcher_b_id=watcher_a.id,watcher_b.id
+            db.add_all([
+                Route(watcher_id=watcher_a_id,source_chat=-88001,target_chat=-88002,
+                      mode="fixed",fixed_id=watcher_a_id,active=True),
+                Route(watcher_id=watcher_b_id,source_chat=-88001,target_chat=-88002,
+                      mode="fixed",fixed_id=watcher_b_id,active=True),
+                Route(watcher_id=watcher_b_id,source_chat=-88002,target_chat=-88001,
+                      mode="fixed",fixed_id=watcher_b_id,active=True)
+            ])
+            db.commit()
+
+        ca,cb=MockClient(),MockClient()
+        old_clients=dict(engine.clients)
+        engine.clients[watcher_a_id]=ca
+        engine.clients[watcher_b_id]=cb
+        try:
+            message=SimpleNamespace(raw_text="동일 게시물 복제 방지 점검",media=None,entities=None)
+            source_event=SimpleNamespace(chat_id=-88001,id=771,sender_id=7700001,
+                                         raw_text=message.raw_text,message=message)
+            async def check():
+                await engine.on_message(watcher_a_id,source_event)
+                await engine.on_message(watcher_b_id,source_event)
+                mirrored=SimpleNamespace(chat_id=-88002,id=779,sender_id=7700002,
+                                         raw_text=message.raw_text,message=message)
+                await engine.on_message(watcher_b_id,mirrored)
+            asyncio.run(check())
+            self.assertEqual(len(ca.sent)+len(cb.sent),1)
+            self.assertEqual((ca.sent+cb.sent)[0],(-88002,message.raw_text))
+            with SessionLocal() as db:
+                claims=list(db.scalars(select(ForwardClaim).where(
+                    ForwardClaim.source_chat==-88001,
+                    ForwardClaim.source_id==771,
+                    ForwardClaim.target_chat==-88002)))
+                self.assertEqual(len(claims),1)
+        finally:
+            engine.clients=old_clients
+
+
 if __name__ == "__main__":
     unittest.main()
