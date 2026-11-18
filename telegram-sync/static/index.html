@@ -555,9 +555,11 @@
                 <label class="label" for="targetSearch">전달할 서브방</label>
                 <div class="settings-toolbar">
                   <input id="targetSearch" type="text" placeholder="서브방 이름 검색" oninput="filterTargets()">
+                  <button class="btn" type="button" id="selectAllTargets" onclick="setTargetChecks(true)">전체 선택</button>
+                  <button class="btn" type="button" id="clearAllTargets" onclick="setTargetChecks(false)">전체 해제</button>
                   <span class="badge" id="selectedTargetCount">0개 선택</span>
                 </div>
-                <div class="help">메인방은 자동 제외됩니다. 이미 연결된 그룹은 중복 등록할 수 없습니다.</div>
+                <div class="help">전체 선택/해제는 검색 중일 때 검색 결과에만 적용됩니다. 메인방과 이미 연결된 그룹은 자동 제외됩니다.</div>
                 <div class="target-list" id="targets"></div>
               </div>
             </div>
@@ -998,6 +1000,17 @@
         if(check.disabled)check.checked=false;
         item.classList.toggle("disabled",same||duplicate);
         item.querySelector(".target-meta").textContent=same?"메인방":duplicate?"이미 연결됨":"";
+      });
+      filterTargets();
+    }
+    function setTargetChecks(checked){
+      // With an active search, affect visible eligible rooms only; otherwise
+      // select/clear the full eligible list. Never override disabled targets.
+      const q=($("targetSearch")?.value||"").trim().toLocaleLowerCase();
+      document.querySelectorAll(".target-item").forEach(item=>{
+        if(q&&!item.dataset.search.includes(q))return;
+        const box=item.querySelector(".targetCheck");
+        if(!box.disabled)box.checked=checked;
       });
       filterTargets();
     }
