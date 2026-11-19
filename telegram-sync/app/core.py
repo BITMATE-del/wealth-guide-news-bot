@@ -462,11 +462,15 @@ class SyncEngine:
                     # close the race with NewMessage echo events.
                     self.mark_forwarded(owner_license_id,route.target_chat,event.message)
                     entity = await c.get_input_entity(route.target_chat)
-                    if event.message.media:
+                    # Telegram URL previews are MessageMediaWebPage objects.
+                    # They are NOT downloadable attachments: send the text and
+                    # preserve its URL/text-link entities instead of dropping it.
+                    media=event.message.media
+                    has_attachment=isinstance(media,(MessageMediaPhoto,MessageMediaDocument))
+                    if has_attachment:
                         raw=await event.message.download_media(file=bytes)
                         if not raw: raise ValueError("지원하지 않는 첨부 형식입니다")
                         if len(raw)>20*1024*1024: raise ValueError("첨부파일 용량 제한 초과 (20MB)")
-                        media = event.message.media
                         file_info = event.message.file
                         original_name = getattr(file_info, "name", None) if file_info else None
                         mime_type = getattr(file_info, "mime_type", None) if file_info else None
@@ -495,7 +499,8 @@ class SyncEngine:
                     else:
                         if not event.raw_text: raise ValueError("전송할 내용이 없습니다")
                         sent=await c.send_message(entity,event.raw_text,
-                              formatting_entities=event.message.entities,link_preview=False)
+                              formatting_entities=event.message.entities or None,
+                              link_preview=False)
                     target_id=sent.id
                     status="sent"
                 finally:
