@@ -872,6 +872,7 @@
             '<div>' +
               '<div class="list-item-title">'+ safe(a.label) +'</div>' +
               '<div class="list-item-sub">'+ safe(a.username ? '@' + a.username : 'ID ' + a.telegram_id) +'</div>' +
+              (a.connection_error?'<div class="list-item-sub" style="color:var(--danger);margin-top:5px">'+safe(a.connection_error)+'</div>':'')+
             '</div>' +
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
               '<span class="status '+ (a.connected ? 'ok' : 'warn') +'">'+ (a.connected ? '연결됨' : '연결 끊김') +'</span>' +
