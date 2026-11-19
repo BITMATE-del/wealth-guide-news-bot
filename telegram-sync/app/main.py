@@ -313,7 +313,8 @@ async def accounts(request:Request):
         query=query.where(Account.license_id==license_id if license_id is not None else Account.license_id.is_(None))
         rows=db.scalars(query).all()
         return [{"id":a.id,"label":a.label,"username":a.username,"telegram_id":a.tg_id,
-                 "enabled":a.enabled,"connected":a.id in engine.clients} for a in rows]
+                 "enabled":a.enabled,"connected":a.id in engine.clients,
+                 "connection_error":engine.connection_errors.get(a.id)} for a in rows]
 
 @app.post("/api/accounts/session/file",dependencies=[Depends(authorized)])
 async def add_session_file(
