@@ -7,7 +7,7 @@ from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from .models import SessionLocal, Account, Route, Delivery, SyncSetting, License, ForwardClaim
+from .models import SessionLocal, Account, Route, Delivery, SyncSetting, License, ForwardClaim, db_engine
 from .licensing import license_active
 
 log = logging.getLogger("group_sync")
@@ -24,33 +24,109 @@ class SyncEngine:
         self.member_count_cache = {}
         self.phone_start_lock = asyncio.Lock()
         self.recent_forwarded = {}
+        self.connection_errors = {}
+        self.worker_lock = None
+        self.worker_task = None
+        self.worker_active = False
     def encrypt(self, s): return self.cipher.encrypt(s.encode()).decode()
     def decrypt(self, s): return self.cipher.decrypt(s.encode()).decode()
     def make_client(self, session=""):
         return TelegramClient(StringSession(session), self.api_id, self.api_hash, sequential_updates=True, flood_sleep_threshold=0)
     async def start(self):
+        # Never attach Telegram sessions in a new Railway deployment until the
+        # previous deployment stops. Telegram permanently revokes auth keys
+        # reused concurrently from different server IPs.
+        self.worker_task=asyncio.create_task(self._worker_lease_loop())
+
+    def _acquire_worker_lease(self):
+        if db_engine.dialect.name!="postgresql":
+            return True  # local SQLite development has a single process
+        connection=db_engine.connect()
+        try:
+            owned=connection.exec_driver_sql("SELECT pg_try_advisory_lock(19483752, 1051)").scalar()
+            connection.commit()  # session-scoped lease remains held
+            if owned:
+                self.worker_lock=connection
+                return True
+        except Exception:
+            connection.close()
+            raise
+        connection.close()
+        return False
+
+    async def _worker_lease_loop(self):
+        # On first rollout older deployments have no lease. Waiting until the
+        # new web process is healthy lets Railway retire the old process first.
+        await asyncio.sleep(20)
+        while True:
+            try:
+                if self._acquire_worker_lease():
+                    self.worker_active=True
+                    await self._connect_saved_accounts()
+                    return
+                log.info("Telegram worker standby: another deployment owns the sessions")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Telegram worker lease not available")
+            await asyncio.sleep(5)
+
+    async def _connect_saved_accounts(self):
         with SessionLocal() as db:
-            accounts = list(db.scalars(select(Account).where(Account.enabled == True)))
+            accounts=list(db.scalars(select(Account).where(Account.enabled == True)))
         for account in accounts:
             if account.license_id is not None:
                 with SessionLocal() as db:
-                    if not license_active(db.get(License, account.license_id)):
+                    if not license_active(db.get(License,account.license_id)):
                         continue
-            try: await self.attach(account)
-            except Exception: log.exception("Account %s reconnect failed", account.id)
+            try:
+                await self.attach(account)
+            except Exception as exc:
+                log.warning("Account %s reconnect failed: %s",account.id,type(exc).__name__)
+                self.connection_errors[account.id]=(
+                    "기존 세션이 무효화됐습니다. 이 계정을 다시 인증해 등록하세요."
+                    if type(exc).__name__ in ("AuthKeyDuplicatedError","AuthKeyUnregisteredError")
+                    else "텔레그램 연결 실패 ("+type(exc).__name__+")"
+                )
+
     async def stop(self):
-        for c in list(self.clients.values()): await c.disconnect()
-        for item in list(self.pending.values()): await item["client"].disconnect()
+        if self.worker_task:
+            self.worker_task.cancel()
+            try: await self.worker_task
+            except asyncio.CancelledError: pass
+        for c in list(self.clients.values()):
+            try: await c.disconnect()
+            except Exception: log.exception("Telegram disconnect failed")
+        for item in list(self.pending.values()):
+            try: await item["client"].disconnect()
+            except Exception: pass
+        self.clients.clear()
+        self.worker_active=False
+        if self.worker_lock is not None:
+            try:
+                self.worker_lock.exec_driver_sql("SELECT pg_advisory_unlock(19483752, 1051)")
+                self.worker_lock.commit()
+            finally:
+                self.worker_lock.close()
+                self.worker_lock=None
+
     async def attach(self, account):
-        client = self.make_client(self.decrypt(account.session_encrypted))
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            raise ValueError("계정 인증이 만료되었습니다")
-        self._handlers(client, account.id)
-        old = self.clients.pop(account.id, None)
+        if not self.worker_active:
+            raise ValueError("서버 배포 중입니다. 텔레그램 연결이 완료된 뒤 다시 시도하세요")
+        client=self.make_client(self.decrypt(account.session_encrypted))
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise ValueError("계정 인증이 만료되었습니다")
+        except Exception:
+            try: await client.disconnect()
+            except Exception: pass
+            raise
+        self._handlers(client,account.id)
+        old=self.clients.pop(account.id,None)
         if old: await old.disconnect()
-        self.clients[account.id] = client
+        self.clients[account.id]=client
+        self.connection_errors.pop(account.id,None)
     def _handlers(self, client, watcher_id):
         @client.on(events.NewMessage)
         async def handler(event):
