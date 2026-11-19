@@ -312,5 +312,61 @@ class LicenseFlowTests(unittest.TestCase):
             engine.clients=old_clients
 
 
+    def test_link_preview_message_is_sent_as_formatted_text(self):
+        import asyncio
+        from types import SimpleNamespace
+        from telethon.tl.types import MessageEntityTextUrl
+        from sqlalchemy import select
+        from app.main import engine
+        from app.models import Account, Route, SessionLocal, SyncSetting
+
+        class MockClient:
+            def __init__(self): self.sent=[]
+            async def get_input_entity(self, chat): return chat
+            async def send_message(self, chat, text, **kw):
+                self.sent.append((chat,text,kw))
+                return SimpleNamespace(id=91001)
+            async def send_file(self,*args,**kw):
+                raise AssertionError("링크 미리보기를 파일로 전송하면 안 됩니다")
+
+        with SessionLocal() as db:
+            watcher=Account(
+                license_id=None,label="Link Preview Test",tg_id=8800101,
+                session_encrypted="not-real",enabled=True)
+            db.add(watcher)
+            setting=db.get(SyncSetting,"delivery_pace")
+            if setting: setting.value="off"
+            else: db.add(SyncSetting(key="delivery_pace",value="off"))
+            db.commit()
+            db.refresh(watcher)
+            wid=watcher.id
+            db.add(Route(
+                watcher_id=wid,source_chat=-99001,target_chat=-99002,
+                mode="fixed",fixed_id=wid,active=True))
+            db.commit()
+
+        client=MockClient()
+        original=dict(engine.clients)
+        engine.clients[wid]=client
+        try:
+            # A URL preview is a media object but NOT a photo or file.
+            # A text-link entity should stay clickable in the target.
+            entities=[MessageEntityTextUrl(offset=0,length=4,url="https://example.org/article")]
+            message=SimpleNamespace(
+                raw_text="기사보기 주요 내용",media=SimpleNamespace(webpage=object()),
+                entities=entities)
+            event=SimpleNamespace(
+                chat_id=-99001,id=11122,sender_id=8800101,
+                raw_text=message.raw_text,message=message)
+            asyncio.run(engine.on_message(wid,event))
+            self.assertEqual(len(client.sent),1)
+            self.assertEqual(client.sent[0][0],-99002)
+            self.assertEqual(client.sent[0][1],message.raw_text)
+            self.assertEqual(client.sent[0][2]["formatting_entities"],entities)
+            self.assertFalse(client.sent[0][2]["link_preview"])
+        finally:
+            engine.clients=original
+
+
 if __name__ == "__main__":
     unittest.main()
