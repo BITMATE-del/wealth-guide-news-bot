@@ -2,7 +2,7 @@ import os, asyncio, io, logging, secrets, sqlite3, tempfile, mimetypes, hashlib
 from pathlib import Path
 from cryptography.fernet import Fernet
 from telethon import TelegramClient, events, functions
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageEntityTextUrl
 from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from sqlalchemy import select
@@ -460,6 +460,49 @@ class SyncEngine:
             self.recent_forwarded={k:v for k,v in self.recent_forwarded.items() if v>now}
         self.recent_forwarded[(license_id or 0,chat_id,signature)]=now+180
 
+    @staticmethod
+    def hidden_links(message):
+        # The Telegram text-url entity contains the real URL while the message
+        # body only contains the visible label (e.g. "메시지 보내기").
+        return [e for e in (getattr(message,"entities",None) or [])
+                if isinstance(e,MessageEntityTextUrl)]
+
+    @staticmethod
+    def links_preserved(source_links, received):
+        if received is None:
+            return False
+        entities=getattr(received,"entities",None) or []
+        actual={(e.offset,e.length,e.url) for e in entities
+                if isinstance(e,MessageEntityTextUrl)}
+        return all((e.offset,e.length,e.url) in actual for e in source_links)
+
+    async def verify_hidden_links(self, client, entity, sent, source_message, text):
+        links=self.hidden_links(source_message)
+        if not links: return
+        if self.links_preserved(links,sent): return
+        # Telethon can receive a partial outgoing update; read back the actual
+        # message before assuming Telegram removed the entities.
+        try:
+            actual=await client.get_messages(entity,ids=sent.id)
+            if self.links_preserved(links,actual): return
+        except Exception as exc:
+            log.warning("Unable to read back linked message %s: %s",
+                        sent.id,type(exc).__name__)
+        # Repair the SAME message; never send a second copy.
+        try:
+            await client.edit_message(
+                entity,sent.id,text,
+                formatting_entities=list(getattr(source_message,"entities",None) or []),
+                parse_mode=None,
+                link_preview=False,
+            )
+            actual=await client.get_messages(entity,ids=sent.id)
+            if self.links_preserved(links,actual): return
+        except Exception as exc:
+            log.warning("Unable to repair linked message %s: %s",
+                        sent.id,type(exc).__name__)
+        raise ValueError("글자에 삽입된 링크가 대상방에서 유지되지 않았습니다. 해당 발신 계정의 링크 전송 권한과 텔레그램 제한을 확인하세요")
+
     async def on_message(self, watcher_id, event):
         if not event.chat_id or not event.sender_id: return
         # A message already delivered by this service must not trigger another forwarding route.
@@ -570,14 +613,18 @@ class SyncEngine:
                             entity, buffer, caption=event.raw_text or "",
                             force_document=send_as_document,
                             supports_streaming=bool(mime_type and mime_type.startswith("video/")),
-                            formatting_entities=event.message.entities or None
+                            formatting_entities=event.message.entities or None,
+                            parse_mode=None
                         )
                     else:
                         if not event.raw_text: raise ValueError("전송할 내용이 없습니다")
                         sent=await c.send_message(entity,event.raw_text,
                               formatting_entities=event.message.entities or None,
-                              link_preview=False)
+                              parse_mode=None,link_preview=False)
                     target_id=sent.id
+                    await self.verify_hidden_links(
+                        c,entity,sent,event.message,event.raw_text or ""
+                    )
                     status="sent"
                 finally:
                     pace_lock.release()
