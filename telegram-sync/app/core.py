@@ -622,6 +622,9 @@ class SyncEngine:
                               formatting_entities=event.message.entities or None,
                               parse_mode=None,link_preview=False)
                     target_id=sent.id
+                    hidden=self.hidden_links(event.message)
+                    if hidden:
+                        log.info("Forward source text-link entities=%s route=%s",len(hidden),route.id)
                     await self.verify_hidden_links(
                         c,entity,sent,event.message,event.raw_text or ""
                     )
@@ -637,7 +640,10 @@ class SyncEngine:
                 delivery.status=status
                 delivery.target_id=target_id
                 delivery.error=error
-                if status!="sent" and claim_id is not None:
+                # If Telegram already created a message, keep the dedupe
+                # claim even if link verification failed. Otherwise another
+                # route can duplicate the partially delivered message.
+                if target_id is None and claim_id is not None:
                     claim=db.get(ForwardClaim,claim_id)
                     if claim is not None: db.delete(claim)
                 db.commit()
