@@ -325,7 +325,7 @@ class LicenseFlowTests(unittest.TestCase):
             async def get_input_entity(self, chat): return chat
             async def send_message(self, chat, text, **kw):
                 self.sent.append((chat,text,kw))
-                return SimpleNamespace(id=91001)
+                return SimpleNamespace(id=91001,entities=kw.get("formatting_entities"))
             async def send_file(self,*args,**kw):
                 raise AssertionError("링크 미리보기를 파일로 전송하면 안 됩니다")
 
@@ -364,8 +364,40 @@ class LicenseFlowTests(unittest.TestCase):
             self.assertEqual(client.sent[0][1],message.raw_text)
             self.assertEqual(client.sent[0][2]["formatting_entities"],entities)
             self.assertFalse(client.sent[0][2]["link_preview"])
+            self.assertIsNone(client.sent[0][2]["parse_mode"])
         finally:
             engine.clients=original
+
+
+    def test_text_url_repair_verifies_actual_telegram_message(self):
+        import asyncio
+        from types import SimpleNamespace
+        from telethon.tl.types import MessageEntityTextUrl
+        from app.main import engine
+
+        link=MessageEntityTextUrl(offset=0,length=6,url="https://example.org/go")
+        source=SimpleNamespace(entities=[link])
+        class Fake:
+            def __init__(self,repair_works):
+                self.repair_works=repair_works
+                self.edits=0
+            async def get_messages(self,entity,ids):
+                return SimpleNamespace(entities=[link] if self.edits and self.repair_works else [])
+            async def edit_message(self,entity,msgid,text,**kwargs):
+                self.edits+=1
+                assert kwargs["formatting_entities"]==[link]
+                assert kwargs["parse_mode"] is None
+        async def run_case(works):
+            client=Fake(works)
+            sent=SimpleNamespace(id=99,entities=[])
+            try:
+                await engine.verify_hidden_links(client,-100,sent,source,"메시지보기")
+                result=True
+            except ValueError:
+                result=False
+            return result,client.edits
+        self.assertEqual(asyncio.run(run_case(True)),(True,1))
+        self.assertEqual(asyncio.run(run_case(False)),(False,1))
 
 
 if __name__ == "__main__":
